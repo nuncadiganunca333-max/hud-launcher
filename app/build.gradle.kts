@@ -9,8 +9,8 @@ android {
         applicationId = "jp.hud.launcher"
         minSdk = 30
         targetSdk = 35
-        versionCode = 10
-        versionName = "6.1"
+        versionCode = 11
+        versionName = "6.2"
     }
     signingConfigs {
         create("fixed") {

@@ -103,6 +103,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
     private var bootStart = 0L
     private var bgLayer: Bitmap? = null
     private var fgLayer: Bitmap? = null
+    private var ovLayer: Bitmap? = null
     private var bgMargin = 0
     private var insetTop = 0f
     private var insetBottom = 0f
@@ -238,6 +239,8 @@ class HudView(context: Context) : View(context), SensorEventListener {
             drawBackground(c, -bgMargin.toFloat(), -bgMargin.toFloat(), W + bgMargin, H + bgMargin)
         }
         fgLayer = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).also { drawForeground(Canvas(it), W, H) }
+        ovLayer?.recycle()
+        ovLayer = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).also { drawOverlay(Canvas(it), W, H) }
         moduleBody()?.let { listener?.onModuleRect(it) }
         invalidate()
     }
@@ -283,6 +286,9 @@ class HudView(context: Context) : View(context), SensorEventListener {
         stroke.strokeWidth = 6f; stroke.color = CYAN
         c.drawLine(topStrip.left, topStrip.bottom, topStrip.left + unit * 3, topStrip.bottom, stroke)
         c.drawLine(topStrip.right - unit * 3, topStrip.bottom, topStrip.right, topStrip.bottom, stroke)
+    }
+
+    private fun drawOverlay(c: Canvas, W: Float, H: Float) {
         // hologram scanlines over everything
         fill.color = Color.argb(14, 0, 0, 0)
         var y = 0f
@@ -366,18 +372,32 @@ class HudView(context: Context) : View(context), SensorEventListener {
             c.save()
             val half = width / 2f * pb
             c.clipRect(width / 2f - half, 0f, width / 2f + half, height.toFloat())
-            drawPanelDepth(c)
-            c.drawBitmap(fg, 0f, 0f, null)
+            // top strip (flat)
+            val ts = RectF(0f, 0f, width.toFloat(), topStrip.bottom + unit * 0.3f)
+            c.drawBitmap(fg, Rect(ts.left.toInt(), ts.top.toInt(), ts.right.toInt(), ts.bottom.toInt()), ts, null)
             drawTopStrip(c, t, now)
-            panels["SYSTEM"]?.let { drawSystem(c, it, t) }
-            panels["POWER"]?.let { drawPower(c, it, t) }
-            panels["CALENDAR"]?.let { drawCalendar(c, it, now) }
-            panels["WEATHER"]?.let { drawWeather(c, it, t) }
-            panels["MEDIA"]?.let { drawMedia(c, it, t) }
-            panels["MODULE"]?.let { drawModule(c, it, t) }
-            panels["NETWORK"]?.let { drawNetwork(c, it, t) }
+            // each panel on its own tilted plane (cockpit-style wraparound)
+            var k = 0
+            for ((name, r) in panels) {
+                c.save()
+                if (name != "MODULE") c.concat(panelMatrix(r))
+                drawPanelBack(c, r)
+                val pad = unit * 0.25f
+                val src = RectF(r.left - pad, r.top - pad, r.right + pad, r.bottom + pad)
+                c.drawBitmap(fg, Rect(src.left.toInt(), src.top.toInt(), src.right.toInt(), src.bottom.toInt()), src, null)
+                sheen(c, r, t, k++)
+                // content floats a little above the frame
+                c.save(); if (name != "MODULE") c.translate(dX * 0.07f, dY * 0.07f)
+                when (name) {
+                    "SYSTEM" -> drawSystem(c, r, t); "POWER" -> drawPower(c, r, t)
+                    "CALENDAR" -> drawCalendar(c, r, now); "WEATHER" -> drawWeather(c, r, t)
+                    "MEDIA" -> drawMedia(c, r, t); "MODULE" -> drawModule(c, r, t)
+                    "NETWORK" -> drawNetwork(c, r, t)
+                }
+                c.restore()
+                c.restore()
+            }
             if (!statusStrip.isEmpty) drawStatus(c, statusStrip, t)
-            sheens(c, t)
             if (pb < 1f) {
                 stroke.strokeWidth = 3f; stroke.color = CYAN
                 c.drawLine(width / 2f - half, 0f, width / 2f - half, height.toFloat(), stroke)
@@ -386,6 +406,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
             c.restore()
         }
 
+        ovLayer?.let { c.drawBitmap(it, 0f, 0f, null) }
         drawFlash(c)
         val sy = ((t * 0.1f) % 1f) * height
         fill.color = Color.WHITE; fill.shader = LinearGradient(0f, sy - unit * 2, 0f, sy, Color.TRANSPARENT, cyan(22), Shader.TileMode.CLAMP)
@@ -394,30 +415,53 @@ class HudView(context: Context) : View(context), SensorEventListener {
         if (running) { if (boot < 1f) postInvalidateOnAnimation() else postInvalidateDelayed(33) }
     }
 
-    private fun drawPanelDepth(c: Canvas) {
-        val ex = -dX * 0.3f - unit * 0.15f; val ey = -dY * 0.3f + unit * 0.35f
-        for ((_, r) in panels) {
-            val b = RectF(r); b.offset(ex, ey)
-            fill.color = Color.argb(200, 0, 8, 16); c.drawRect(b, fill)
-            stroke.strokeWidth = 1.5f; stroke.color = cyan(55); c.drawRect(b, stroke)
-            stroke.color = cyan(80)
-            c.drawLine(r.left, r.top, b.left, b.top, stroke); c.drawLine(r.right, r.top, b.right, b.top, stroke)
-            c.drawLine(r.left, r.bottom, b.left, b.bottom, stroke); c.drawLine(r.right, r.bottom, b.right, b.bottom, stroke)
+    private val polySrc = FloatArray(8)
+    private val polyDst = FloatArray(8)
+    private val pm = Matrix()
+
+    /** パネルごとの遠近変形：画面の外側ほど手前に来る曲面配置＋端末の傾きに追従 */
+    private fun panelMatrix(r: RectF): Matrix {
+        val W = width.toFloat(); val H = height.toFloat()
+        val side = ((r.centerX() - W / 2) / (W / 2)).coerceIn(-1f, 1f)
+        val vert = ((r.centerY() - H / 2) / (H / 2)).coerceIn(-1f, 1f)
+        val g = (-side * 0.07f + dX / unit * 0.018f).coerceIn(-0.12f, 0.12f)   // 左右の辺の高さ比
+        val h = (-vert * 0.035f - dY / unit * 0.018f).coerceIn(-0.1f, 0.1f)   // 上下の辺の幅比
+        val hw = r.width() / 2; val hh = r.height() / 2
+        val pcx = r.centerX() + dX * 0.12f; val pcy = r.centerY() + dY * 0.12f
+        var n = 0
+        for ((sx, sy) in listOf(-1f to -1f, 1f to -1f, 1f to 1f, -1f to 1f)) {
+            polySrc[n] = r.centerX() + sx * hw; polySrc[n + 1] = r.centerY() + sy * hh
+            val wf = if (sy < 0) 1 + h else 1 - h
+            val hf = if (sx < 0) 1 + g else 1 - g
+            polyDst[n] = pcx + sx * hw * wf; polyDst[n + 1] = pcy + sy * hh * hf
+            n += 2
         }
+        pm.setPolyToPoly(polySrc, 0, polyDst, 0, 4)
+        return pm
     }
 
-    private fun sheens(c: Canvas, t: Float) {
-        var k = 0
-        for ((_, r) in panels) {
-            val ph = ((t * 0.18f + k * 0.29f) % 1.8f) - 0.4f
-            k++
-            if (ph < -0.2f || ph > 1.2f) continue
-            val x = r.left + ph * r.width(); val w = unit * 4
-            c.save(); c.clipRect(r.left, r.top, r.right, r.top + headerH())
-            fill.color = Color.WHITE; fill.shader = LinearGradient(x - w, 0f, x + w, 0f, intArrayOf(Color.TRANSPARENT, cyan(70), Color.TRANSPARENT), null, Shader.TileMode.CLAMP)
-            c.drawRect(x - w, r.top, x + w, r.top + headerH(), fill); fill.shader = null
-            c.restore()
-        }
+    private fun drawPanelBack(c: Canvas, r: RectF) {
+        val ex = -dX * 0.3f - unit * 0.15f; val ey = -dY * 0.3f + unit * 0.4f
+        val b = RectF(r); b.offset(ex, ey)
+        fill.color = Color.argb(210, 0, 7, 14); c.drawRect(b, fill)
+        stroke.strokeWidth = 1.5f; stroke.color = cyan(50); c.drawRect(b, stroke)
+        stroke.color = cyan(85)
+        c.drawLine(r.left, r.top, b.left, b.top, stroke); c.drawLine(r.right, r.top, b.right, b.top, stroke)
+        c.drawLine(r.left, r.bottom, b.left, b.bottom, stroke); c.drawLine(r.right, r.bottom, b.right, b.bottom, stroke)
+        // side face shading
+        fill.color = cyan(14)
+        val side = Path().apply { moveTo(r.left, r.bottom); lineTo(r.right, r.bottom); lineTo(b.right, b.bottom); lineTo(b.left, b.bottom); close() }
+        c.drawPath(side, fill)
+    }
+
+    private fun sheen(c: Canvas, r: RectF, t: Float, k: Int) {
+        val ph = ((t * 0.18f + k * 0.29f) % 1.8f) - 0.4f
+        if (ph < -0.2f || ph > 1.2f) return
+        val x = r.left + ph * r.width(); val w = unit * 4
+        c.save(); c.clipRect(r.left, r.top, r.right, r.top + headerH())
+        fill.color = Color.WHITE; fill.shader = LinearGradient(x - w, 0f, x + w, 0f, intArrayOf(Color.TRANSPARENT, cyan(70), Color.TRANSPARENT), null, Shader.TileMode.CLAMP)
+        c.drawRect(x - w, r.top, x + w, r.top + headerH(), fill); fill.shader = null
+        c.restore()
     }
 
     private fun hexStream(seed: Long, len: Int): String {
