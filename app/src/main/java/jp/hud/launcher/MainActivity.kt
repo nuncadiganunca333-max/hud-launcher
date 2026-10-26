@@ -145,7 +145,9 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
         }
         updateTalkHint()
         checkCarConnected()
-        startWake(1200)
+        checkTalkIntent(intent)
+        if (talkRequested) { talkRequested = false; intent = Intent(this, MainActivity::class.java); handler.postDelayed({ startAssistant() }, 250) }
+        else startWake(1200)
         NotifService.sink = { onNotif(it, live = true) }
         startMedia()
         // ホーム以外にいた間に届いた通知（10分以内）
@@ -177,8 +179,14 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
         assistant.close()
     }
 
+    private var talkRequested = false
+    private fun checkTalkIntent(i: Intent?) {
+        if (i?.component?.className?.endsWith("TalkAlias") == true) talkRequested = true
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        checkTalkIntent(intent)
         closeDrawer()
     }
 
@@ -249,7 +257,9 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
             if (alert.isShowing && n != null && n.key == key) alertListen(n)
         } else if (id == "assistant") {
             // 続けて会話：返事が終わったら自動でマイクを開く
-            if (assistant.isShowing && assistant.state == AssistantOverlay.State.SPEAKING) { assistant.state = AssistantOverlay.State.IDLE; listen(auto = true) }
+            if (assistant.isShowing && sessionActive) listen(auto = true)
+        } else if (id == "bye") {
+            assistant.close(); startWake(800)
         }
     }
 
@@ -687,7 +697,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
                 "会話をリセット", "アラーム一覧を開く", "ホームアプリを切り替え",
                 "画面の常時点灯：${arrayOf("常に", "充電中のみ", "OFF")[prefs.getInt("screenOn", 0)]}",
                 "アシスタントの名前（いま：${aiName()}）",
-                "呼びかけ起動：${arrayOf("ホーム表示中", "充電中のみ", "OFF")[prefs.getInt("wakeMode", 0)]}",
+                "呼びかけ起動：${arrayOf("ホーム表示中", "充電中・ドライブ中", "OFF")[prefs.getInt("wakeMode", 1)]}",
                 "ドライブモードの車を設定", "ドライブモードを試す")) { _, w ->
                 when (w) {
                     0 -> askApiKey(); 1 -> askName(); 2 -> pickVoice(); 3 -> tuneVoice()
@@ -701,7 +711,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
                         }.show()
                     10 -> askAiName()
                     11 -> AlertDialog.Builder(this).setTitle("「${aiName()}」の呼びかけで起動")
-                        .setSingleChoiceItems(arrayOf("ホーム表示中はいつでも", "充電中のみ（電池にやさしい）", "OFF（タップだけ）"), prefs.getInt("wakeMode", 0)) { d, which ->
+                        .setSingleChoiceItems(arrayOf("ホーム表示中はいつでも", "充電中・ドライブ中のみ（電池にやさしい）", "OFF（タップだけ）"), prefs.getInt("wakeMode", 1)) { d, which ->
                             prefs.edit().putInt("wakeMode", which).apply(); updateTalkHint(); stopWake(); startWake(500); d.dismiss()
                         }.show()
                     12 -> pickCar()
@@ -763,14 +773,15 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
     private var resumed = false
 
     private fun wakeAllowed(): Boolean {
-        val mode = prefs.getInt("wakeMode", 0)
-        return resumed && mode != 2 && (mode == 0 || hud.stats.charging) &&
+        val mode = prefs.getInt("wakeMode", 1)
+        return resumed && mode != 2 && (mode == 0 || hud.stats.charging || drive.isShowing) &&
             checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED &&
             !assistant.isShowing && !alert.listening && fxPlayer == null && apiKey().isNotEmpty()
     }
 
     private fun updateTalkHint() {
-        hud.talkHint = if (prefs.getInt("wakeMode", 0) != 2 && apiKey().isNotEmpty()) "SAY \"${aiTag()}\"  /  TAP" else "TAP TO TALK"
+        val m = prefs.getInt("wakeMode", 1)
+        hud.talkHint = if (apiKey().isNotEmpty() && (m == 0 || (m == 1 && (hud.stats.charging || drive.isShowing)))) "SAY \"${aiTag()}\"  /  TAP" else "TAP TO TALK"
     }
 
     private fun startWake(delay: Long = 300) {
@@ -971,47 +982,89 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
         }
     }
 
+    // ---------- conversation session (「アトラス」で開始 →「終了」で閉じる) ----------
+    private var sessionActive = false
+    private var lastVoiceAt = 0L
+    private var recErrors = 0
+    private var onDeviceOk = true
+    private val SESSION_SILENCE_MS = 180_000L
+    private val END_WORDS = listOf("終了", "しゅうりょう", "おわり", "終わり", "バイバイ", "ばいばい", "おやすみ", "閉じて", "とじて", "もういいよ", "以上")
+
+    private fun makeRecognizer(): android.speech.SpeechRecognizer =
+        if (onDeviceOk && Build.VERSION.SDK_INT >= 33 && android.speech.SpeechRecognizer.isOnDeviceRecognitionAvailable(this))
+            android.speech.SpeechRecognizer.createOnDeviceSpeechRecognizer(this)
+        else android.speech.SpeechRecognizer.createSpeechRecognizer(this)
+
+    private fun isEnd(text: String): Boolean {
+        val t = text.replace(" ", "").replace("、", "").replace("。", "")
+        return END_WORDS.any { t == it || t.endsWith(it) && t.length <= it.length + 6 }
+    }
+
+    private fun endSession(farewell: Boolean) {
+        sessionActive = false
+        recognizer?.cancel()
+        if (farewell && ttsReady) {
+            assistant.state = AssistantOverlay.State.SPEAKING; assistant.reply = "かしこまりました。また呼んでください。"
+            speakOut("かしこまりました。また呼んでください。", "bye")
+        } else { assistant.close(); startWake(600) }
+    }
+
     private fun listen(auto: Boolean = false) {
         stopSpeech()
         if (!android.speech.SpeechRecognizer.isRecognitionAvailable(this)) {
             assistant.state = AssistantOverlay.State.ERROR; assistant.reply = "この端末では音声認識が使えないようです"; return
         }
-        recognizer?.destroy()
-        val r = android.speech.SpeechRecognizer.createSpeechRecognizer(this)
-        recognizer = r
-        assistant.heard = ""; assistant.reply = ""; assistant.level = 0f
+        if (!auto) { sessionActive = true; lastVoiceAt = System.currentTimeMillis(); recErrors = 0; SoundFx.play(SoundFx.Fx.LISTEN) }
+        val r = recognizer ?: makeRecognizer().also { recognizer = it }
+        assistant.level = 0f
         assistant.state = AssistantOverlay.State.LISTENING
-        SoundFx.play(SoundFx.Fx.LISTEN)
         r.setRecognitionListener(object : android.speech.RecognitionListener {
             override fun onReadyForSpeech(p: Bundle?) {}
-            override fun onBeginningOfSpeech() {}
+            override fun onBeginningOfSpeech() { lastVoiceAt = System.currentTimeMillis() }
             override fun onRmsChanged(rms: Float) { assistant.level = ((rms + 2f) / 12f).coerceIn(0f, 1f); hud.voiceLevel = assistant.level }
             override fun onBufferReceived(b: ByteArray?) {}
             override fun onEndOfSpeech() { assistant.level = 0f }
             override fun onError(error: Int) {
                 assistant.level = 0f
-                if (assistant.state == AssistantOverlay.State.LISTENING) {
-                    assistant.state = AssistantOverlay.State.IDLE
-                    val quiet = error == android.speech.SpeechRecognizer.ERROR_NO_MATCH || error == android.speech.SpeechRecognizer.ERROR_SPEECH_TIMEOUT
-                    if (auto && quiet) { SoundFx.play(SoundFx.Fx.DONE); assistant.reply = "ほかにご用があれば、マイクをタップしてください。" }
-                    else assistant.reply = if (quiet) "聞き取れませんでした。マイクをタップしてもう一度どうぞ。" else "音声認識エラー（$error）"
+                if (!assistant.isShowing || !sessionActive) return
+                val quiet = error == android.speech.SpeechRecognizer.ERROR_NO_MATCH || error == android.speech.SpeechRecognizer.ERROR_SPEECH_TIMEOUT
+                if (quiet) {
+                    // 無音なら表示はそのまま、静かに聞き取りを続ける
+                    if (System.currentTimeMillis() - lastVoiceAt > SESSION_SILENCE_MS) { endSession(false); return }
+                    handler.postDelayed({ if (sessionActive && assistant.isShowing) listen(auto = true) }, 120)
+                    return
                 }
+                if (error == 12 || error == 13) onDeviceOk = false  // 端末内認識が日本語非対応 → 通常の認識に切替
+                recognizer?.destroy(); recognizer = null
+                recErrors++
+                if (recErrors > 5) { assistant.state = AssistantOverlay.State.ERROR; assistant.reply = "音声認識がうまく動きません（$error）。マイクをタップして再開できます。"; sessionActive = false; return }
+                handler.postDelayed({ if (sessionActive && assistant.isShowing) listen(auto = true) }, 700)
             }
             override fun onResults(b: Bundle?) {
-                val text = b?.getStringArrayList(android.speech.SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.trim().orEmpty()
-                if (text.isEmpty()) { assistant.state = AssistantOverlay.State.IDLE; assistant.reply = "聞き取れませんでした。"; return }
+                if (!assistant.isShowing) return
+                var text = b?.getStringArrayList(android.speech.SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.trim().orEmpty()
+                if (text.isEmpty()) { handler.postDelayed({ if (sessionActive) listen(auto = true) }, 120); return }
+                recErrors = 0; lastVoiceAt = System.currentTimeMillis()
+                // 先頭の呼びかけ（アトラス、）は取り除く
+                wakeWords().firstOrNull { text.lowercase().startsWith(it) }?.let { w -> text = text.substring(w.length).trim(' ', '、', '。', ',') }
+                if (text.isEmpty()) { SoundFx.play(SoundFx.Fx.TAP); listen(auto = true); return }
                 assistant.heard = text
+                if (isEnd(text)) { endSession(true); return }
                 think(text)
             }
             override fun onPartialResults(b: Bundle?) {
-                b?.getStringArrayList(android.speech.SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.let { if (it.isNotBlank()) assistant.heard = it }
+                b?.getStringArrayList(android.speech.SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.let { if (it.isNotBlank()) { assistant.heard = it; lastVoiceAt = System.currentTimeMillis() } }
             }
             override fun onEvent(t: Int, b: Bundle?) {}
         })
-        r.startListening(Intent(android.speech.RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
-            .putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE_MODEL, android.speech.RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            .putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE, "ja-JP")
-            .putExtra(android.speech.RecognizerIntent.EXTRA_PARTIAL_RESULTS, true))
+        try {
+            r.startListening(Intent(android.speech.RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+                .putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE_MODEL, android.speech.RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                .putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE, "ja-JP")
+                .putExtra(android.speech.RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+                .putExtra(android.speech.RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1200L)
+                .putExtra(android.speech.RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 1000L))
+        } catch (e: Exception) { recognizer = null; handler.postDelayed({ if (sessionActive) listen(auto = true) }, 700) }
     }
 
     private fun playBeep() {
@@ -1056,6 +1109,7 @@ $notifs
                 if (out.startsWith("ERR:")) {
                     SoundFx.play(SoundFx.Fx.ERROR)
                     assistant.state = AssistantOverlay.State.ERROR; assistant.reply = out.removePrefix("ERR:")
+                    if (sessionActive) handler.postDelayed({ if (sessionActive && assistant.isShowing) listen(auto = true) }, 2500)
                 } else {
                     SoundFx.play(SoundFx.Fx.DONE, haptic = false)
                     assistant.state = AssistantOverlay.State.SPEAKING; assistant.reply = out
@@ -1083,7 +1137,7 @@ $notifs
                 else {
                     ui {
                         handler.postDelayed({
-                            assistant.close()
+                            sessionActive = false; recognizer?.cancel(); assistant.close()
                             val r = android.graphics.Rect(hud.width / 2 - 100, hud.height / 2 - 100, hud.width / 2 + 100, hud.height / 2 + 100)
                             hud.flashLaunch(r, hit.label); launch(hit, r, 320)
                         }, 1600)
@@ -1131,8 +1185,11 @@ $notifs
 
     override fun onAssistantMic() { SoundFx.play(SoundFx.Fx.TAP); if (assistant.state != AssistantOverlay.State.LISTENING) listen() }
 
+    private fun endSessionQuiet() { sessionActive = false }
+
     override fun onAssistantClose() {
         SoundFx.play(SoundFx.Fx.BACK)
+        sessionActive = false
         recognizer?.cancel(); stopSpeech()
         assistant.close()
         startWake(600)
@@ -1385,6 +1442,12 @@ $notifs
             s.memHist = memHist.toList(); s.battHist = battHist.toList()
             hud.stats = s
             drive.stats = s
+            hud.lowPower = !s.charging
+            if (tick % 5 == 0) updateTalkHint()
+            if (prefs.getInt("screenOn", 0) == 0 && !s.charging && !drive.isShowing && !assistant.isShowing &&
+                System.currentTimeMillis() - hud.lastTouchAt > 180_000) {
+                window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            } else if (tick % 10 == 0) applyKeepScreen()
             tick++
             if (System.currentTimeMillis() - lastWeather > 30 * 60 * 1000) fetchWeather()
             handler.postDelayed(this, 1000)

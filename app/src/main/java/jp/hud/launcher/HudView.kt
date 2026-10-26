@@ -85,6 +85,8 @@ class HudView(context: Context) : View(context), SensorEventListener {
     var spectrum: FloatArray? = null  // music FFT bands 0..1
     var idleTimeoutMs = 45000L
     var talkHint = "TAP TO TALK"
+    var lowPower = false
+    val lastTouchAt get() = lastTouch
     var moduleLinked = false
         set(v) { field = v; invalidate() }
     fun moduleBody(): RectF? = panels["MODULE"]?.let { RectF(it.left + unit * 0.35f, it.top + headerH() + unit * 0.25f, it.right - unit * 0.35f, it.bottom - unit * 0.3f) }
@@ -388,7 +390,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
 
         layerPaint.alpha = (255 * min(1f, boot * 2.5f)).toInt()
         c.drawBitmap(bg, -bgMargin - px * 0.7f, -bgMargin - py * 0.7f, layerPaint)
-        drawDataRain(c, t)
+        if (!lowPower) drawDataRain(c, t)
 
         // core group
         c.save()
@@ -472,7 +474,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
 
         if (running) {
             val anim = boot < 1f || expanded != null || ripples.isNotEmpty() || nowMs - incomingAt < 800 || abs(idleP - idleTarget) > 0.01f
-            when { anim -> postInvalidateOnAnimation(); idleP > 0.9f -> postInvalidateDelayed(66); else -> postInvalidateDelayed(33) }
+            when { anim -> postInvalidateOnAnimation(); idleP > 0.9f -> postInvalidateDelayed(if (lowPower) 160 else 66); else -> postInvalidateDelayed(if (lowPower) 50 else 33) }
         }
     }
 
