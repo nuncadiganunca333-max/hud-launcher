@@ -908,7 +908,12 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
     private var wakeActive = false
     private var resumed = false
 
+    /** マナーモード（バイブ・サイレント）中か */
+    private fun silentMode(): Boolean =
+        (getSystemService(AUDIO_SERVICE) as AudioManager).ringerMode != AudioManager.RINGER_MODE_NORMAL
+
     private fun wakeAllowed(): Boolean {
+        if (silentMode() && !drive.isShowing) return false
         val mode = prefs.getInt("wakeMode2", 0)
         val always = mode == 1 && (hud.stats.charging || drive.isShowing)
         return resumed && mode != 2 && (System.currentTimeMillis() < wakeDeadline || always) &&
@@ -921,7 +926,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
         val left = ((wakeDeadline - System.currentTimeMillis()) / 1000).toInt()
         val always = m == 1 && (hud.stats.charging || drive.isShowing)
         hud.talkHint = when {
-            apiKey().isEmpty() || m == 2 -> "TAP GLOBE TO TALK"
+            apiKey().isEmpty() || m == 2 || (silentMode() && !drive.isShowing) -> "TAP GLOBE TO TALK"
             always -> "SAY \"${aiTag()}\"  /  TAP GLOBE"
             left >= 0 && wakeActive -> "SAY \"${aiTag()}\""
             else -> "TAP GLOBE TO TALK"
