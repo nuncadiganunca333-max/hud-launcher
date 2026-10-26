@@ -319,6 +319,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
     }
 
     private fun launch(app: AppEntry, src: android.graphics.Rect? = null, delayMs: Long = 0) {
+        prefs.edit().putInt("cnt:" + app.key, countOf(app) + 1).apply()
         val go = Runnable {
             try {
                 val opts = src?.let {
@@ -759,7 +760,7 @@ $notifs
         })
         box.addView(header)
         box.addView(TextView(this).apply {
-            text = "タップで起動 ／ 長押しでリングに登録・解除"
+            text = "上段はよく使うアプリ ／ タップで起動 ／ 長押しでリングに登録・解除"
             setTextColor(Color.argb(160, 0, 229, 255)); textSize = 12f
             setPadding(0, dp(2), 0, dp(10))
         })
@@ -777,7 +778,7 @@ $notifs
         box.addView(search, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(12) })
         grid = GridView(this).apply {
             numColumns = GridView.AUTO_FIT
-            columnWidth = dp(150)
+            columnWidth = dp(92)
             stretchMode = GridView.STRETCH_COLUMN_WIDTH
             horizontalSpacing = dp(8); verticalSpacing = dp(8)
             adapter = object : BaseAdapter() {
@@ -785,16 +786,33 @@ $notifs
                 override fun getItem(p: Int) = filtered[p]
                 override fun getItemId(p: Int) = p.toLong()
                 override fun getView(p: Int, cv: View?, parent: ViewGroup?): View {
-                    val tv = (cv as? TextView) ?: TextView(this@MainActivity).apply {
-                        setTextColor(CYAN); textSize = 14f; gravity = Gravity.CENTER
-                        maxLines = 2; setPadding(dp(8), dp(14), dp(8), dp(14))
-                        typeface = Typeface.create("sans-serif-condensed", Typeface.NORMAL)
+                    val cell = (cv as? LinearLayout) ?: LinearLayout(this@MainActivity).apply {
+                        orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL
+                        setPadding(dp(4), dp(10), dp(4), dp(8))
+                        val ring = FrameLayout(this@MainActivity).apply {
+                            background = GradientDrawable().apply {
+                                shape = GradientDrawable.OVAL
+                                setColor(Color.argb(50, 0, 229, 255)); setStroke(dp(1), Color.argb(170, 0, 229, 255))
+                            }
+                            setPadding(dp(7), dp(7), dp(7), dp(7))
+                            addView(ImageView(this@MainActivity), FrameLayout.LayoutParams(dp(44), dp(44)))
+                        }
+                        addView(ring, LinearLayout.LayoutParams(dp(58), dp(58)))
+                        addView(TextView(this@MainActivity).apply {
+                            setTextColor(CYAN); textSize = 11.5f; gravity = Gravity.CENTER
+                            maxLines = 2; ellipsize = android.text.TextUtils.TruncateAt.END
+                            setPadding(0, dp(6), 0, 0)
+                            typeface = Typeface.create("sans-serif-condensed", Typeface.NORMAL)
+                        }, LinearLayout.LayoutParams(-1, -2))
                     }
                     val app = filtered[p]
                     val docked = hud.dock.any { it.key == app.key }
-                    tv.text = if (docked) "◆ ${app.label}" else app.label
-                    tv.background = frameBg(if (docked) 230 else 110)
-                    return tv
+                    val ring = cell.getChildAt(0) as FrameLayout
+                    (ring.getChildAt(0) as ImageView).setImageDrawable(iconOf(app))
+                    (ring.background as GradientDrawable).setStroke(dp(if (docked) 2 else 1), Color.argb(if (docked) 255 else 150, 0, 229, 255))
+                    (cell.getChildAt(1) as TextView).text = if (docked) "◆ ${app.label}" else app.label
+                    cell.background = if (p < frequentCount) frameBg(70) else null
+                    return cell
                 }
             }
             setOnItemClickListener { _, v, p, _ ->
@@ -815,10 +833,29 @@ $notifs
         setColor(Color.argb(60, 0, 40, 60)); setStroke(dp(1), Color.argb(alpha, 0, 229, 255))
     }
 
+    private val iconCache = HashMap<String, android.graphics.drawable.Drawable>()
+    private var frequentCount = 0
+
+    private fun iconOf(app: AppEntry): android.graphics.drawable.Drawable? = iconCache.getOrPut(app.key) {
+        try { packageManager.getActivityIcon(ComponentName(app.pkg, app.cls)) } catch (e: Exception) {
+            try { packageManager.getApplicationIcon(app.pkg) } catch (e2: Exception) { return null }
+        }
+    }
+
+    private fun countOf(app: AppEntry) = prefs.getInt("cnt:" + app.key, 0)
+
     private fun applyFilter() {
         if (!::grid.isInitialized) return
         val q = search.text.toString().trim().lowercase()
-        filtered = if (q.isEmpty()) apps else apps.filter { it.label.lowercase().contains(q) }
+        if (q.isEmpty()) {
+            // よく使うアプリを先頭に（最大8個）、残りは名前順
+            val freq = apps.filter { countOf(it) > 0 }.sortedByDescending { countOf(it) }.take(8)
+            frequentCount = freq.size
+            filtered = freq + apps.filter { a -> freq.none { it.key == a.key } }
+        } else {
+            frequentCount = 0
+            filtered = apps.filter { it.label.lowercase().contains(q) || it.pkg.lowercase().contains(q) }
+        }
         (grid.adapter as BaseAdapter).notifyDataSetChanged()
     }
 
