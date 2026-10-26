@@ -656,19 +656,31 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
     private fun useEleven() = prefs.getString("ttsProvider", "device") == "eleven" && elKey().isNotEmpty() && !prefs.getString("elVoiceId", "").isNullOrEmpty()
 
     /** ElevenLabs で音声を作って mp3 に保存（バックグラウンドで呼ぶ） */
-    private fun elevenTts(text: String, out: java.io.File, voiceId: String? = null): Boolean = try {
+    private fun elevenTts(text: String, out: java.io.File, voiceId: String? = null): Boolean {
         val vid = voiceId ?: prefs.getString("elVoiceId", "")!!
-        val con = URL("https://api.elevenlabs.io/v1/text-to-speech/$vid?output_format=mp3_44100_128").openConnection() as HttpURLConnection
-        con.requestMethod = "POST"; con.doOutput = true; con.connectTimeout = 10000; con.readTimeout = 30000
-        con.setRequestProperty("xi-api-key", elKey())
-        con.setRequestProperty("content-type", "application/json")
-        con.setRequestProperty("accept", "audio/mpeg")
-        val body = JSONObject().put("text", text).put("model_id", prefs.getString("elModel", "eleven_v4_turbo"))
-            .put("voice_settings", JSONObject().put("stability", 0.55).put("similarity_boost", 0.8).put("style", 0.15))
-        con.outputStream.use { it.write(body.toString().toByteArray()) }
-        if (con.responseCode in 200..299) { con.inputStream.use { inp -> out.outputStream().use { inp.copyTo(it) } }; true }
-        else false
-    } catch (e: Exception) { false }
+        // 選んだモデルが使えない場合は、日本語に強い定番モデルへ順に切り替える
+        val models = listOf(prefs.getString("elModel", "eleven_v4_turbo")!!, "eleven_multilingual_v2", "eleven_flash_v2_5").distinct()
+        for (m in models) {
+            try {
+                val con = URL("https://api.elevenlabs.io/v1/text-to-speech/$vid?output_format=mp3_44100_128").openConnection() as HttpURLConnection
+                con.requestMethod = "POST"; con.doOutput = true; con.connectTimeout = 10000; con.readTimeout = 30000
+                con.setRequestProperty("xi-api-key", elKey())
+                con.setRequestProperty("content-type", "application/json")
+                con.setRequestProperty("accept", "audio/mpeg")
+                val body = JSONObject().put("text", text).put("model_id", m)
+                    .put("voice_settings", JSONObject().put("stability", 0.55).put("similarity_boost", 0.8).put("style", 0.15))
+                con.outputStream.use { it.write(body.toString().toByteArray()) }
+                val code = con.responseCode
+                if (code in 200..299) {
+                    con.inputStream.use { inp -> out.outputStream().use { inp.copyTo(it) } }
+                    if (m != prefs.getString("elModel", "eleven_v4_turbo")) prefs.edit().putString("elModel", m).apply()
+                    return true
+                }
+                if (code == 401 || code == 402 || code == 429) return false
+            } catch (e: Exception) { }
+        }
+        return false
+    }
 
     private fun setupEleven() {
         val et = EditText(this).apply {
