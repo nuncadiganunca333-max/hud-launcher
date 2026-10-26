@@ -15,6 +15,8 @@ import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.os.StatFs
+import android.os.SystemClock
+import android.net.TrafficStats
 import android.provider.AlarmClock
 import android.provider.Settings
 import android.text.Editable
@@ -65,7 +67,7 @@ class MainActivity : Activity(), HudView.Listener {
 
         root.setOnApplyWindowInsetsListener { v, ins ->
             val bars = ins.getInsets(WindowInsets.Type.systemBars())
-            hud.setTopInset(bars.top)
+            hud.setInsets(bars.top, bars.bottom)
             drawer.setPadding(dp(16), bars.top + dp(12), dp(16), bars.bottom + dp(12))
             ins
         }
@@ -116,10 +118,10 @@ class MainActivity : Activity(), HudView.Listener {
     private fun toggleDock(app: AppEntry) {
         val keys = prefs.getString("dock", "")!!.split("|").filter { it.isNotEmpty() }.toMutableList()
         if (keys.remove(app.key)) {
-            toast("ドックから外しました：${app.label}")
+            toast("リングから外しました：${app.label}")
         } else {
-            if (keys.size >= 5) { toast("ドックは5個までです"); return }
-            keys += app.key; toast("ドックに登録：${app.label}")
+            if (keys.size >= 7) { toast("リングに登録できるのは7個までです"); return }
+            keys += app.key; toast("リングに登録：${app.label}")
         }
         saveDock(keys); refreshDock()
     }
@@ -153,7 +155,7 @@ class MainActivity : Activity(), HudView.Listener {
         })
         box.addView(header)
         box.addView(TextView(this).apply {
-            text = "タップで起動 ／ 長押しでドックに登録・解除"
+            text = "タップで起動 ／ 長押しでリングに登録・解除"
             setTextColor(Color.argb(160, 0, 229, 255)); textSize = 12f
             setPadding(0, dp(2), 0, dp(10))
         })
@@ -225,6 +227,17 @@ class MainActivity : Activity(), HudView.Listener {
     }
 
     // ---------- stats ----------
+    private var lastRx = -1L
+    private var lastTx = -1L
+    private var lastSample = 0L
+    private var tick = 0
+    private val rxHist = ArrayDeque<Float>()
+    private val txHist = ArrayDeque<Float>()
+    private val memHist = ArrayDeque<Float>()
+    private val battHist = ArrayDeque<Float>()
+
+    private fun push(q: ArrayDeque<Float>, v: Float, max: Int) { q.addLast(v); while (q.size > max) q.removeFirst() }
+
     private val statsLoop = object : Runnable {
         override fun run() {
             val s = hud.stats.copy()
@@ -234,15 +247,36 @@ class MainActivity : Activity(), HudView.Listener {
                 s.battery = lv * 100 / sc.coerceAtLeast(1)
                 val st = it.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
                 s.charging = st == BatteryManager.BATTERY_STATUS_CHARGING || st == BatteryManager.BATTERY_STATUS_FULL
+                s.battTemp = it.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 0) / 10f
+                s.voltage = it.getIntExtra(BatteryManager.EXTRA_VOLTAGE, 0)
             }
             val mi = ActivityManager.MemoryInfo()
             (getSystemService(ACTIVITY_SERVICE) as ActivityManager).getMemoryInfo(mi)
             s.memory = (100 - mi.availMem * 100 / mi.totalMem.coerceAtLeast(1)).toInt()
-            val fs = StatFs(Environment.getDataDirectory().path)
-            s.storage = (100 - fs.availableBytes * 100 / fs.totalBytes.coerceAtLeast(1)).toInt()
+            if (tick % 10 == 0) {
+                val fs = StatFs(Environment.getDataDirectory().path)
+                s.storage = (100 - fs.availableBytes * 100 / fs.totalBytes.coerceAtLeast(1)).toInt()
+            }
+            s.uptimeMs = SystemClock.elapsedRealtime()
+
+            val nowMs = SystemClock.elapsedRealtime()
+            val rx = TrafficStats.getTotalRxBytes(); val tx = TrafficStats.getTotalTxBytes()
+            if (lastRx >= 0 && rx >= lastRx && tx >= lastTx && nowMs > lastSample) {
+                val sec = (nowMs - lastSample) / 1000f
+                s.rxKbps = (rx - lastRx) / 1024f / sec
+                s.txKbps = (tx - lastTx) / 1024f / sec
+            }
+            lastRx = rx; lastTx = tx; lastSample = nowMs
+            push(rxHist, s.rxKbps, 60); push(txHist, s.txKbps, 60)
+            if (tick % 2 == 0) push(memHist, s.memory.toFloat(), 60)
+            if (battHist.isEmpty()) { push(battHist, s.battery.toFloat(), 120); push(battHist, s.battery.toFloat(), 120) }
+            if (tick % 60 == 0) push(battHist, s.battery.toFloat(), 120)
+            s.rxHist = rxHist.toList(); s.txHist = txHist.toList()
+            s.memHist = memHist.toList(); s.battHist = battHist.toList()
             hud.stats = s
+            tick++
             if (System.currentTimeMillis() - lastWeather > 30 * 60 * 1000) fetchWeather()
-            handler.postDelayed(this, 5000)
+            handler.postDelayed(this, 1000)
         }
     }
 
@@ -251,8 +285,8 @@ class MainActivity : Activity(), HudView.Listener {
         thread {
             try {
                 val url = URL("https://api.open-meteo.com/v1/forecast?latitude=$LAT&longitude=$LON" +
-                        "&current=temperature_2m,relative_humidity_2m,weather_code" +
-                        "&daily=weather_code,temperature_2m_max,temperature_2m_min&timezone=Asia%2FTokyo&forecast_days=4")
+                        "&current=temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,wind_speed_10m&wind_speed_unit=ms" +
+                        "&daily=weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset&timezone=Asia%2FTokyo&forecast_days=4")
                 val con = url.openConnection() as HttpURLConnection
                 con.connectTimeout = 8000; con.readTimeout = 8000
                 val body = con.inputStream.bufferedReader().readText()
@@ -272,6 +306,10 @@ class MainActivity : Activity(), HudView.Listener {
                         temp = cur.getDouble("temperature_2m").toFloat(),
                         humidity = cur.getInt("relative_humidity_2m"),
                         weather = wx(cur.getInt("weather_code")),
+                        feels = cur.getDouble("apparent_temperature").toFloat(),
+                        wind = cur.getDouble("wind_speed_10m").toFloat(),
+                        sunrise = daily.getJSONArray("sunrise").getString(0).takeLast(5),
+                        sunset = daily.getJSONArray("sunset").getString(0).takeLast(5),
                         forecast = lines,
                     )
                 }
@@ -294,12 +332,13 @@ class MainActivity : Activity(), HudView.Listener {
     override fun onDockLongPress(app: AppEntry) = toggleDock(app)
     override fun onClockTap() = safeStart(Intent(AlarmClock.ACTION_SHOW_ALARMS))
     override fun onHomeSettings() = safeStart(Intent(Settings.ACTION_HOME_SETTINGS))
-    override fun onGaugeTap(index: Int) {
-        when (index) {
-            0 -> safeStart(Intent(Intent.ACTION_POWER_USAGE_SUMMARY))
-            1 -> { lastWeather = 0; fetchWeather(); toast("天気を更新中…") }
-            2 -> safeStart(Intent(Settings.ACTION_APPLICATION_SETTINGS))
-            3 -> safeStart(Intent(Settings.ACTION_INTERNAL_STORAGE_SETTINGS))
+    override fun onPanelTap(panel: String) {
+        when (panel) {
+            "POWER" -> safeStart(Intent(Intent.ACTION_POWER_USAGE_SUMMARY))
+            "WEATHER", "FORECAST" -> { lastWeather = 0; fetchWeather(); toast("天気を更新中…") }
+            "SYSTEM" -> safeStart(Intent(Settings.ACTION_INTERNAL_STORAGE_SETTINGS))
+            "CALENDAR" -> safeStart(Intent.makeMainSelectorActivity(Intent.ACTION_MAIN, Intent.CATEGORY_APP_CALENDAR))
+            "NETWORK" -> safeStart(Intent(Settings.ACTION_WIFI_SETTINGS))
         }
     }
 
