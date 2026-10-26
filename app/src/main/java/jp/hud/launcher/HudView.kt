@@ -61,6 +61,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
         fun onClockTap()
         fun onHomeSettings()
         fun onTopStripTap()
+        fun onCoreLongPress()
         fun onModuleRect(r: RectF)
         fun onModuleEdit()
     }
@@ -239,7 +240,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
 
     // ======================= STATIC LAYERS =======================
     private fun drawBackground(c: Canvas, x0: Float, y0: Float, x1: Float, y1: Float) {
-        fill.shader = RadialGradient(cx, cy, max(x1 - x0, y1 - y0) * 0.8f,
+        fill.color = Color.WHITE; fill.shader = RadialGradient(cx, cy, max(x1 - x0, y1 - y0) * 0.8f,
             intArrayOf(Color.rgb(8, 46, 76), Color.rgb(3, 18, 34), Color.rgb(1, 5, 11)),
             floatArrayOf(0f, 0.5f, 1f), Shader.TileMode.CLAMP)
         c.drawRect(x0, y0, x1, y1, fill); fill.shader = null
@@ -283,7 +284,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
         var y = 0f
         while (y < H) { c.drawRect(0f, y, W, y + 2f, fill); y += 5f }
         // vignette
-        fill.shader = RadialGradient(W / 2, H / 2, max(W, H) * 0.75f, intArrayOf(Color.TRANSPARENT, Color.TRANSPARENT, Color.argb(120, 0, 0, 0)),
+        fill.color = Color.WHITE; fill.shader = RadialGradient(W / 2, H / 2, max(W, H) * 0.75f, intArrayOf(Color.TRANSPARENT, Color.TRANSPARENT, Color.argb(120, 0, 0, 0)),
             floatArrayOf(0f, 0.65f, 1f), Shader.TileMode.CLAMP)
         c.drawRect(0f, 0f, W, H, fill); fill.shader = null
     }
@@ -291,7 +292,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
     private fun headerH() = unit * 1.05f
 
     private fun panelFrame(c: Canvas, r: RectF, title: String?) {
-        fill.shader = LinearGradient(0f, r.top, 0f, r.bottom, Color.argb(200, 3, 30, 50), Color.argb(215, 1, 14, 26), Shader.TileMode.CLAMP)
+        fill.color = Color.WHITE; fill.shader = LinearGradient(0f, r.top, 0f, r.bottom, Color.argb(200, 3, 30, 50), Color.argb(215, 1, 14, 26), Shader.TileMode.CLAMP)
         c.drawRect(r, fill); fill.shader = null
         stroke.strokeWidth = 2f; stroke.color = cyan(120); c.drawRect(r, stroke)
         stroke.strokeWidth = 1f; stroke.color = cyan(40)
@@ -378,7 +379,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
 
         drawFlash(c)
         val sy = ((t * 0.1f) % 1f) * height
-        fill.shader = LinearGradient(0f, sy - unit * 2, 0f, sy, Color.TRANSPARENT, cyan(22), Shader.TileMode.CLAMP)
+        fill.color = Color.WHITE; fill.shader = LinearGradient(0f, sy - unit * 2, 0f, sy, Color.TRANSPARENT, cyan(22), Shader.TileMode.CLAMP)
         c.drawRect(0f, sy - unit * 2, width.toFloat(), sy, fill); fill.shader = null
 
         if (running) { if (boot < 1f) postInvalidateOnAnimation() else postInvalidateDelayed(33) }
@@ -392,7 +393,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
             if (ph < -0.2f || ph > 1.2f) continue
             val x = r.left + ph * r.width(); val w = unit * 4
             c.save(); c.clipRect(r.left, r.top, r.right, r.top + headerH())
-            fill.shader = LinearGradient(x - w, 0f, x + w, 0f, intArrayOf(Color.TRANSPARENT, cyan(70), Color.TRANSPARENT), null, Shader.TileMode.CLAMP)
+            fill.color = Color.WHITE; fill.shader = LinearGradient(x - w, 0f, x + w, 0f, intArrayOf(Color.TRANSPARENT, cyan(70), Color.TRANSPARENT), null, Shader.TileMode.CLAMP)
             c.drawRect(x - w, r.top, x + w, r.top + headerH(), fill); fill.shader = null
             c.restore()
         }
@@ -477,7 +478,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
 
         // radar sweep
         c.save(); c.rotate(t * 70f, cx, cy)
-        stroke.shader = SweepGradient(cx, cy, intArrayOf(Color.TRANSPARENT, Color.TRANSPARENT, cyan(110)), floatArrayOf(0f, 0.75f, 1f))
+        stroke.color = Color.WHITE; stroke.shader = SweepGradient(cx, cy, intArrayOf(Color.TRANSPARENT, Color.TRANSPARENT, cyan(110)), floatArrayOf(0f, 0.75f, 1f))
         stroke.strokeWidth = coreR * 0.12f
         c.drawCircle(cx, cy, coreR * 0.715f, stroke); stroke.shader = null
         stroke.strokeWidth = 3f; stroke.color = cyan(200)
@@ -498,7 +499,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
             p.arcTo(outer, a0, sweep, true); p.arcTo(inner, a0 + sweep, -sweep); p.close()
             val near = 1f - min(1f, abs(hl - i).let { min(it, n - it) })
             val active = sg.app != null || sg.isApps
-            fill.shader = RadialGradient(cx, cy, r2, intArrayOf(cyan(0), cyan(if (sg.isApps) 70 else if (active) 35 else 10), cyan(if (sg.isApps) 120 else if (active) (55 + 60 * near).toInt() else 18)),
+            fill.color = Color.WHITE; fill.shader = RadialGradient(cx, cy, r2, intArrayOf(cyan(0), cyan(if (sg.isApps) 70 else if (active) 35 else 10), cyan(if (sg.isApps) 120 else if (active) (55 + 60 * near).toInt() else 18)),
                 floatArrayOf(0f, r1 / r2, 1f), Shader.TileMode.CLAMP)
             c.drawPath(p, fill); fill.shader = null
             if (active) { glow.strokeWidth = 6f; glow.color = cyan((60 + 80 * near).toInt()); c.drawPath(p, glow) }
@@ -542,7 +543,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
 
         // layered hexagon core
         val hr = coreR * 0.5f
-        fill.shader = RadialGradient(cx, cy, hr, intArrayOf(cyan(80), cyan(20), cyan(0)), floatArrayOf(0f, 0.7f, 1f), Shader.TileMode.CLAMP)
+        fill.color = Color.WHITE; fill.shader = RadialGradient(cx, cy, hr, intArrayOf(cyan(80), cyan(20), cyan(0)), floatArrayOf(0f, 0.7f, 1f), Shader.TileMode.CLAMP)
         c.drawPath(hexPath(hr, t * 6f), fill); fill.shader = null
         val pulse = (sin(t * 2.2f) + 1) / 2
         glow.strokeWidth = 16f; glow.color = cyan((90 + 100 * pulse).toInt()); c.drawPath(hexPath(hr, t * 6f), glow)
@@ -566,6 +567,8 @@ class HudView(context: Context) : View(context), SensorEventListener {
         val wd = now.get(Calendar.DAY_OF_WEEK) - 1
         label.textAlign = Paint.Align.CENTER; label.textSize = coreR * 0.065f; label.color = cyan(220); label.letterSpacing = 0.25f
         c.drawText(arrayOf("SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY")[wd], cx, cy + big * 0.95f, label)
+        label.textSize = coreR * 0.042f; label.letterSpacing = 0.3f; label.color = cyan((120 + 80 * sin(t * 2f)).toInt())
+        c.drawText("TAP TO TALK", cx, cy + big * 1.38f, label)
         label.letterSpacing = 0f; label.color = CYAN; mono.color = CYAN
     }
 
@@ -596,7 +599,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
             val f = (on - k).coerceIn(0f, 1f)
             fill.color = cyan(26); c.drawRect(x + k * (bw + gap), y, x + k * (bw + gap) + bw, y + h, fill)
             if (f > 0f) {
-                fill.shader = LinearGradient(0f, y, 0f, y + h, withA(col, 255), withA(col, 150), Shader.TileMode.CLAMP)
+                fill.color = Color.WHITE; fill.shader = LinearGradient(0f, y, 0f, y + h, withA(col, 255), withA(col, 150), Shader.TileMode.CLAMP)
                 c.drawRect(x + k * (bw + gap), y + h * (1 - f), x + k * (bw + gap) + bw, y + h, fill); fill.shader = null
             }
         }
@@ -629,7 +632,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
             lx = x; ly = y
         }
         area.lineTo(r.right, r.bottom); area.close()
-        fill.shader = LinearGradient(0f, r.top, 0f, r.bottom, withA(col, 110), withA(col, 0), Shader.TileMode.CLAMP)
+        fill.color = Color.WHITE; fill.shader = LinearGradient(0f, r.top, 0f, r.bottom, withA(col, 110), withA(col, 0), Shader.TileMode.CLAMP)
         c.drawPath(area, fill); fill.shader = null
         glow.strokeWidth = 8f; glow.color = withA(col, 130); c.drawPath(line, glow)
         stroke.strokeWidth = 3f; stroke.color = col; c.drawPath(line, stroke)
@@ -818,7 +821,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
         graph(c, g, rx, CYAN, t, fixedMax = mx)
         graph(c, g, tx, BLUE, t, fixedMax = mx, grid = false)
         val sx = g.left + ((t * 0.25f) % 1f) * g.width()
-        fill.shader = LinearGradient(sx - unit * 2, 0f, sx, 0f, Color.TRANSPARENT, cyan(60), Shader.TileMode.CLAMP)
+        fill.color = Color.WHITE; fill.shader = LinearGradient(sx - unit * 2, 0f, sx, 0f, Color.TRANSPARENT, cyan(60), Shader.TileMode.CLAMP)
         c.drawRect(sx - unit * 2, g.top, sx, g.bottom, fill); fill.shader = null
         if (s.rxKbps < 1f && s.txKbps < 1f) {
             label.textAlign = Paint.Align.CENTER; label.textSize = fs * 0.9f; label.letterSpacing = 0.4f
@@ -886,7 +889,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
             for (k in 0 until n) {
                 val e = if (m.playing) (0.15f + 0.85f * abs(sin(t * (3.1f + k * 0.37f) + k * 1.7f) * sin(t * 1.3f + k * 0.5f))) else 0.06f
                 val h = (vBot - vTop) * e
-                fill.shader = LinearGradient(0f, vBot - h, 0f, vBot, CYAN, cyan(60), Shader.TileMode.CLAMP)
+                fill.color = Color.WHITE; fill.shader = LinearGradient(0f, vBot - h, 0f, vBot, CYAN, cyan(60), Shader.TileMode.CLAMP)
                 c.drawRect(tx + k * bw + bw * 0.18f, vBot - h, tx + (k + 1) * bw - bw * 0.18f, vBot, fill); fill.shader = null
             }
         }
@@ -1018,6 +1021,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
     private fun longPress(x: Float, y: Float) {
         segmentAt(x, y)?.app?.let { listener?.onDockLongPress(it); return }
         panels["MODULE"]?.let { if (it.contains(x, y)) { listener?.onModuleEdit(); return } }
+        if (hypot(x - cx - px * 0.5f, y - cy - py * 0.5f) < coreR * 0.55f) { listener?.onCoreLongPress(); return }
         if (y < topStrip.bottom + unit) listener?.onHomeSettings()
     }
 }

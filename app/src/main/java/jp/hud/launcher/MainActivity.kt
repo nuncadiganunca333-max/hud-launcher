@@ -43,7 +43,7 @@ data class AppEntry(val label: String, val pkg: String, val cls: String) {
     val key get() = "$pkg/$cls"
 }
 
-class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener {
+class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, AssistantOverlay.Listener {
 
     private val CYAN = Color.rgb(0, 229, 255)
     private lateinit var hud: HudView
@@ -55,6 +55,11 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener {
     private val handler = Handler(Looper.getMainLooper())
     private var lastWeather = 0L
     private lateinit var alert: AlertOverlay
+    private lateinit var assistant: AssistantOverlay
+    private var recognizer: android.speech.SpeechRecognizer? = null
+    private val agent = ClaudeAgent("")
+    private val recentNotifs = ArrayDeque<NotifItem>()
+    private val REQ_MIC = 51
     private lateinit var moduleFrame: FrameLayout
     private lateinit var widgetHost: android.appwidget.AppWidgetHost
     private var widgetView: android.appwidget.AppWidgetHostView? = null
@@ -83,7 +88,9 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener {
         widgetHost = android.appwidget.AppWidgetHost(this, 4711)
         restoreWidget()
         alert = AlertOverlay(this).also { it.listener = this }
+        assistant = AssistantOverlay(this).also { it.listener = this }
         root.addView(alert, FrameLayout.LayoutParams(-1, -1))
+        root.addView(assistant, FrameLayout.LayoutParams(-1, -1))
         drawer = buildDrawer()
         root.addView(drawer, FrameLayout.LayoutParams(-1, -1))
         tts = TextToSpeech(this) { st ->
@@ -131,6 +138,8 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener {
         handler.removeCallbacks(statsLoop)
         NotifService.sink = null
         tts?.stop()
+        recognizer?.destroy(); recognizer = null
+        assistant.close()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -140,6 +149,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener {
 
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
+        if (assistant.isShowing) { onAssistantClose(); return }
         if (alert.isShowing) alert.listener?.let { onAlertDismiss(alertQueue.firstOrNull() ?: return) }
         else if (drawer.visibility == View.VISIBLE) closeDrawer()
     }
@@ -158,6 +168,9 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener {
     }
 
     private fun onNotif(n: NotifItem, live: Boolean) {
+        recentNotifs.removeAll { it.key == n.key }; recentNotifs.addFirst(n)
+        while (recentNotifs.size > 6) recentNotifs.removeLast()
+        if (assistant.isShowing) return
         alertQueue.removeAll { it.key == n.key }
         alertQueue.addLast(n)
         while (alertQueue.size > 6) alertQueue.removeFirst()
@@ -273,8 +286,12 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener {
         v.layoutParams = lp
         val d = resources.displayMetrics.density
         val wdp = (moduleRect.width() / d).toInt(); val hdp = (moduleRect.height() / d).toInt()
-        @Suppress("DEPRECATION")
-        v.updateAppWidgetSize(null, wdp, hdp, wdp, hdp)
+        if (Build.VERSION.SDK_INT >= 31) {
+            v.updateAppWidgetSize(Bundle(), listOf(android.util.SizeF(wdp.toFloat(), hdp.toFloat())))
+        } else {
+            @Suppress("DEPRECATION")
+            v.updateAppWidgetSize(null, wdp, hdp, wdp, hdp)
+        }
     }
 
     private fun restoreWidget() {
@@ -367,6 +384,226 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener {
             REQ_BIND -> configureWidget(id)
             REQ_CONFIG -> { finishWidget(id); pendingWidgetId = -1 }
         }
+    }
+
+    // ---------- Claude assistant ----------
+    private fun apiKey() = prefs.getString("apiKey", "") ?: ""
+
+    override fun onCoreLongPress() {
+        AlertDialog.Builder(this).setTitle("HUD 設定")
+            .setItems(arrayOf("Claude APIキーを設定", "呼び名を変更（いま：${callName()}）", "会話をリセット", "アラーム一覧を開く", "ホームアプリを切り替え")) { _, w ->
+                when (w) {
+                    0 -> askApiKey(); 1 -> askName(); 2 -> { agent.reset(); toast("会話をリセットしました") }
+                    3 -> safeStart(Intent(AlarmClock.ACTION_SHOW_ALARMS)); 4 -> onHomeSettings()
+                }
+            }.show()
+    }
+
+    private fun callName() = prefs.getString("callName", "Yudaiさん") ?: "Yudaiさん"
+
+    private fun askName() {
+        val et = EditText(this).apply { setText(callName()); setSingleLine() }
+        AlertDialog.Builder(this).setTitle("呼び名").setView(et)
+            .setPositiveButton("保存") { _, _ -> prefs.edit().putString("callName", et.text.toString().trim()).apply() }
+            .setNegativeButton("キャンセル", null).show()
+    }
+
+    private fun askApiKey() {
+        val et = EditText(this).apply {
+            hint = "sk-ant-..."; setSingleLine()
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+            setText(apiKey())
+        }
+        AlertDialog.Builder(this).setTitle("Claude APIキー")
+            .setMessage("console.anthropic.com で発行したAPIキーを貼り付けてください。キーはこの端末の中にだけ保存されます。")
+            .setView(et)
+            .setPositiveButton("保存") { _, _ -> prefs.edit().putString("apiKey", et.text.toString().trim()).apply(); agent.reset(); toast("保存しました。コアをタップして話しかけてください") }
+            .setNeutralButton("発行ページを開く") { _, _ -> safeStart(Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://console.anthropic.com/settings/keys"))) }
+            .setNegativeButton("キャンセル", null).show()
+    }
+
+    private fun startAssistant() {
+        if (apiKey().isEmpty()) { askApiKey(); return }
+        if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(arrayOf(android.Manifest.permission.RECORD_AUDIO), REQ_MIC); return
+        }
+        closeDrawer()
+        assistant.open()
+        listen()
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQ_MIC) {
+            if (grantResults.firstOrNull() == android.content.pm.PackageManager.PERMISSION_GRANTED) startAssistant()
+            else toast("マイクの許可がないと話しかけられません")
+        }
+    }
+
+    private fun listen() {
+        tts?.stop()
+        if (!android.speech.SpeechRecognizer.isRecognitionAvailable(this)) {
+            assistant.state = AssistantOverlay.State.ERROR; assistant.reply = "この端末では音声認識が使えないようです"; return
+        }
+        recognizer?.destroy()
+        val r = android.speech.SpeechRecognizer.createSpeechRecognizer(this)
+        recognizer = r
+        assistant.heard = ""; assistant.reply = ""; assistant.level = 0f
+        assistant.state = AssistantOverlay.State.LISTENING
+        playBeep()
+        r.setRecognitionListener(object : android.speech.RecognitionListener {
+            override fun onReadyForSpeech(p: Bundle?) {}
+            override fun onBeginningOfSpeech() {}
+            override fun onRmsChanged(rms: Float) { assistant.level = ((rms + 2f) / 12f).coerceIn(0f, 1f) }
+            override fun onBufferReceived(b: ByteArray?) {}
+            override fun onEndOfSpeech() { assistant.level = 0f }
+            override fun onError(error: Int) {
+                assistant.level = 0f
+                if (assistant.state == AssistantOverlay.State.LISTENING) {
+                    assistant.state = AssistantOverlay.State.IDLE
+                    assistant.reply = if (error == android.speech.SpeechRecognizer.ERROR_NO_MATCH || error == android.speech.SpeechRecognizer.ERROR_SPEECH_TIMEOUT)
+                        "聞き取れませんでした。マイクをタップしてもう一度どうぞ。" else "音声認識エラー（$error）"
+                }
+            }
+            override fun onResults(b: Bundle?) {
+                val text = b?.getStringArrayList(android.speech.SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.trim().orEmpty()
+                if (text.isEmpty()) { assistant.state = AssistantOverlay.State.IDLE; assistant.reply = "聞き取れませんでした。"; return }
+                assistant.heard = text
+                think(text)
+            }
+            override fun onPartialResults(b: Bundle?) {
+                b?.getStringArrayList(android.speech.SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.let { if (it.isNotBlank()) assistant.heard = it }
+            }
+            override fun onEvent(t: Int, b: Bundle?) {}
+        })
+        r.startListening(Intent(android.speech.RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+            .putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE_MODEL, android.speech.RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            .putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE, "ja-JP")
+            .putExtra(android.speech.RecognizerIntent.EXTRA_PARTIAL_RESULTS, true))
+    }
+
+    private fun playBeep() {
+        try { android.media.ToneGenerator(android.media.AudioManager.STREAM_MUSIC, 35).startTone(android.media.ToneGenerator.TONE_PROP_BEEP, 90) } catch (e: Exception) { }
+    }
+
+    private fun systemPrompt(): String {
+        val s = hud.stats
+        val now = java.text.SimpleDateFormat("yyyy年M月d日(E) H:mm", Locale.JAPAN).format(java.util.Date())
+        val m = hud.media
+        val media = if (m == null) "なし" else "${m.title} / ${m.artist}（${if (m.playing) "再生中" else "一時停止"}）"
+        val notifs = recentNotifs.mapIndexed { i, n -> "${i + 1}. ${n.appLabel}：${n.title}" }.joinToString("\n").ifEmpty { "なし" }
+        val appNames = apps.joinToString("、") { it.label }
+        return """あなたは${callName()}のスマートフォン（Galaxy Z Fold7）のホーム画面に組み込まれたAIアシスタント、Claudeです。
+映画に出てくる有能なAI執事のように、落ち着いて丁寧、ときどき軽いウィットを交えて話してください。相手は「${callName()}」と呼びます。
+返答は音声で読み上げられます。話し言葉で1〜3文に短くまとめ、記号・箇条書き・絵文字・URLは使わないでください。
+端末の操作が必要なときはツールを使い、実行後は結果をひとことで伝えてください。わからないことや最新情報は推測で断言せず、必要ならweb_searchを使ってください。
+テスラ車の直接操作はできません。頼まれたら、ホームのMODULE欄のテスラウィジェットかテスラアプリを案内してください。
+
+【現在の状況】
+日時：$now
+バッテリー：${s.battery}%（${if (s.charging) "充電中" else "放電中"}）、端末温度 ${s.battTemp}℃
+天気（静岡市清水区）：${s.weather}、気温 ${s.temp ?: "不明"}℃、湿度 ${s.humidity}%、風速 ${s.wind}m/s
+予報：${s.forecast.joinToString("／")}
+再生中：$media
+最近の通知：
+$notifs
+インストール済みアプリ：$appNames"""
+    }
+
+    private fun think(text: String) {
+        assistant.state = AssistantOverlay.State.THINKING
+        agent.apiKey = apiKey()
+        val sys = systemPrompt()
+        thread {
+            val out = try {
+                agent.ask(text, sys, ClaudeAgent.tools()) { name, input -> runTool(name, input) }
+            } catch (e: ClaudeAgent.ApiError) { "ERR:" + e.message }
+            runOnUiThread {
+                if (!assistant.isShowing) return@runOnUiThread
+                if (out.startsWith("ERR:")) {
+                    assistant.state = AssistantOverlay.State.ERROR; assistant.reply = out.removePrefix("ERR:")
+                } else {
+                    assistant.state = AssistantOverlay.State.SPEAKING; assistant.reply = out
+                    speakReply(out)
+                }
+            }
+        }
+    }
+
+    private fun speakReply(text: String) {
+        if (!ttsReady) { assistant.state = AssistantOverlay.State.IDLE; return }
+        tts?.setOnUtteranceProgressListener(object : android.speech.tts.UtteranceProgressListener() {
+            override fun onStart(id: String?) {}
+            override fun onDone(id: String?) { runOnUiThread { if (assistant.isShowing && assistant.state == AssistantOverlay.State.SPEAKING) assistant.state = AssistantOverlay.State.IDLE } }
+            @Deprecated("Deprecated in Java") override fun onError(id: String?) {}
+        })
+        tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "assistant")
+    }
+
+    /** Claude が呼ぶ端末操作（バックグラウンドスレッドから呼ばれる） */
+    private fun runTool(name: String, input: JSONObject): String {
+        fun ui(block: () -> Unit) = runOnUiThread(block)
+        return when (name) {
+            "open_app" -> {
+                val q = input.optString("name").lowercase().replace(" ", "")
+                val hit = apps.firstOrNull { it.label.lowercase().replace(" ", "") == q }
+                    ?: apps.firstOrNull { it.label.lowercase().replace(" ", "").contains(q) }
+                    ?: apps.firstOrNull { q.contains(it.label.lowercase().replace(" ", "")) && it.label.length >= 2 }
+                if (hit == null) "見つかりませんでした。候補: " + apps.filter { a -> q.take(2).let { a.label.lowercase().contains(it) } }.take(5).joinToString { it.label }
+                else {
+                    ui {
+                        handler.postDelayed({
+                            assistant.close()
+                            val r = android.graphics.Rect(hud.width / 2 - 100, hud.height / 2 - 100, hud.width / 2 + 100, hud.height / 2 + 100)
+                            hud.flashLaunch(r, hit.label); launch(hit, r, 320)
+                        }, 1600)
+                    }
+                    "${hit.label}を起動します"
+                }
+            }
+            "media_control" -> {
+                val c = controller ?: return "再生中のメディアがありません"
+                when (input.optString("action")) {
+                    "play" -> c.transportControls.play(); "pause" -> c.transportControls.pause()
+                    "next" -> c.transportControls.skipToNext(); "previous" -> c.transportControls.skipToPrevious()
+                }
+                "OK"
+            }
+            "set_timer" -> {
+                val sec = input.optInt("seconds")
+                safeStart(Intent(AlarmClock.ACTION_SET_TIMER).putExtra(AlarmClock.EXTRA_LENGTH, sec)
+                    .putExtra(AlarmClock.EXTRA_MESSAGE, input.optString("label", "HUD")).putExtra(AlarmClock.EXTRA_SKIP_UI, true))
+                "${sec}秒のタイマーをセットしました"
+            }
+            "set_alarm" -> {
+                safeStart(Intent(AlarmClock.ACTION_SET_ALARM).putExtra(AlarmClock.EXTRA_HOUR, input.optInt("hour"))
+                    .putExtra(AlarmClock.EXTRA_MINUTES, input.optInt("minute"))
+                    .putExtra(AlarmClock.EXTRA_MESSAGE, input.optString("label", "HUD")).putExtra(AlarmClock.EXTRA_SKIP_UI, true))
+                "アラームをセットしました"
+            }
+            "flashlight" -> try {
+                val cm = getSystemService(CAMERA_SERVICE) as android.hardware.camera2.CameraManager
+                val id = cm.cameraIdList.first { cm.getCameraCharacteristics(it).get(android.hardware.camera2.CameraCharacteristics.FLASH_INFO_AVAILABLE) == true }
+                cm.setTorchMode(id, input.optBoolean("on")); if (input.optBoolean("on")) "点灯しました" else "消灯しました"
+            } catch (e: Exception) { "ライトを操作できませんでした" }
+            "web_search" -> {
+                ui { handler.postDelayed({ assistant.close(); safeStart(Intent(Intent.ACTION_WEB_SEARCH).putExtra(android.app.SearchManager.QUERY, input.optString("query"))) }, 1600) }
+                "検索を開きます"
+            }
+            "open_notification" -> {
+                val n = recentNotifs.toList().getOrNull(input.optInt("index") - 1) ?: return "その番号の通知はありません"
+                ui { handler.postDelayed({ assistant.close(); onAlertOpen(n, null) }, 1400) }
+                "${n.appLabel}の通知を開きます"
+            }
+            else -> "unknown tool"
+        }
+    }
+
+    override fun onAssistantMic() { if (assistant.state != AssistantOverlay.State.LISTENING) listen() }
+
+    override fun onAssistantClose() {
+        recognizer?.cancel(); tts?.stop()
+        assistant.close()
     }
 
     // ---------- media ----------
@@ -633,7 +870,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener {
     override fun onOpenDrawer() = openDrawer()
     override fun onLaunch(app: AppEntry, src: android.graphics.Rect?) = launch(app, src, delayMs = 320)
     override fun onDockLongPress(app: AppEntry) = toggleDock(app)
-    override fun onClockTap() = safeStart(Intent(AlarmClock.ACTION_SHOW_ALARMS))
+    override fun onClockTap() = startAssistant()
     override fun onHomeSettings() = safeStart(Intent(Settings.ACTION_HOME_SETTINGS))
     override fun onPanelTap(panel: String) {
         when (panel) {
