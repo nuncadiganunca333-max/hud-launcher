@@ -9,13 +9,22 @@ android {
         applicationId = "jp.hud.launcher"
         minSdk = 30
         targetSdk = 35
-        versionCode = 2
-        versionName = "2.0"
+        versionCode = 3
+        versionName = "2.1"
+    }
+    signingConfigs {
+        create("fixed") {
+            storeFile = file("hud.keystore")
+            storePassword = "hudlauncher"
+            keyAlias = "hud"
+            keyPassword = "hudlauncher"
+        }
     }
     buildTypes {
+        debug { signingConfig = signingConfigs.getByName("fixed") }
         release {
             isMinifyEnabled = false
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.getByName("fixed")
         }
     }
     compileOptions {
