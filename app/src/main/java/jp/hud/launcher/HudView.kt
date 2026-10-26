@@ -84,6 +84,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
     var voiceLevel = 0f           // mic level while listening
     var spectrum: FloatArray? = null  // music FFT bands 0..1
     var idleTimeoutMs = 45000L
+    var talkHint = "TAP TO TALK"
     var moduleLinked = false
         set(v) { field = v; invalidate() }
     fun moduleBody(): RectF? = panels["MODULE"]?.let { RectF(it.left + unit * 0.35f, it.top + headerH() + unit * 0.25f, it.right - unit * 0.35f, it.bottom - unit * 0.3f) }
@@ -974,7 +975,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
         label.textAlign = Paint.Align.CENTER; label.textSize = coreR * 0.065f; label.color = cyan(220); label.letterSpacing = 0.25f
         c.drawText(arrayOf("SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY")[wd], cx, cy + big * 0.95f, label)
         label.textSize = coreR * 0.042f; label.letterSpacing = 0.3f; label.color = cyan((120 + 80 * sin(t * 2f)).toInt())
-        c.drawText("TAP TO TALK", cx, cy + big * 1.38f, label)
+        c.drawText(talkHint, cx, cy + big * 1.38f, label)
         c.restore()
         label.letterSpacing = 0f; label.color = CYAN; mono.color = CYAN
     }

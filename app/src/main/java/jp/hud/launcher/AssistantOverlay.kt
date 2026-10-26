@@ -21,6 +21,7 @@ class AssistantOverlay(context: Context) : View(context) {
     }
 
     var listener: Listener? = null
+    var title = "ATLAS"
     var state = State.IDLE
         set(v) { field = v; invalidate() }
     var level = 0f          // mic level 0..1
@@ -82,7 +83,7 @@ class AssistantOverlay(context: Context) : View(context) {
         val hh = u * 1.5f
         fill.color = cyan(40); c.drawRect(panel.left, panel.top, panel.right, panel.top + hh, fill)
         label.textAlign = Paint.Align.LEFT; label.textSize = hh * 0.5f; label.letterSpacing = 0.25f; label.color = CYAN
-        c.drawText("◆ CLAUDE // ASSISTANT", panel.left + u * 0.7f, panel.top + hh * 0.68f, label)
+        c.drawText("◆ $title // ASSISTANT", panel.left + u * 0.7f, panel.top + hh * 0.68f, label)
         label.textAlign = Paint.Align.RIGHT
         val st = when (state) {
             State.LISTENING -> "LISTENING"; State.THINKING -> "PROCESSING"; State.SPEAKING -> "RESPONDING"

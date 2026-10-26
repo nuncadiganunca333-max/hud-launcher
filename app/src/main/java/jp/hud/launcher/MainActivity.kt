@@ -43,7 +43,7 @@ data class AppEntry(val label: String, val pkg: String, val cls: String) {
     val key get() = "$pkg/$cls"
 }
 
-class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, AssistantOverlay.Listener {
+class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, AssistantOverlay.Listener, DriveView.Listener {
 
     private val CYAN = Color.rgb(0, 229, 255)
     private lateinit var hud: HudView
@@ -56,6 +56,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
     private var lastWeather = 0L
     private lateinit var alert: AlertOverlay
     private lateinit var assistant: AssistantOverlay
+    private lateinit var drive: DriveView
     private var recognizer: android.speech.SpeechRecognizer? = null
     private val agent = ClaudeAgent("")
     private val recentNotifs = ArrayDeque<NotifItem>()
@@ -91,12 +92,18 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
         restoreWidget()
         alert = AlertOverlay(this).also { it.listener = this }
         assistant = AssistantOverlay(this).also { it.listener = this }
+        drive = DriveView(this).also { it.listener = this }
+        root.addView(drive, FrameLayout.LayoutParams(-1, -1))
         root.addView(alert, FrameLayout.LayoutParams(-1, -1))
         root.addView(assistant, FrameLayout.LayoutParams(-1, -1))
         drawer = buildDrawer()
         root.addView(drawer, FrameLayout.LayoutParams(-1, -1))
         SoundFx.init(this)
         initTts()
+        val bf = IntentFilter().apply {
+            addAction(android.bluetooth.BluetoothDevice.ACTION_ACL_CONNECTED); addAction(android.bluetooth.BluetoothDevice.ACTION_ACL_DISCONNECTED)
+        }
+        if (Build.VERSION.SDK_INT >= 33) registerReceiver(btReceiver, bf, RECEIVER_EXPORTED) else registerReceiver(btReceiver, bf)
         setContentView(root)
 
         root.setOnApplyWindowInsetsListener { v, ins ->
@@ -122,11 +129,23 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
             prefs.edit().putBoolean("askedNotif", true).apply()
             askNotifAccess()
         }
-        if (checkSelfPermission(android.Manifest.permission.ACCESS_COARSE_LOCATION) != android.content.pm.PackageManager.PERMISSION_GRANTED
-            && !prefs.getBoolean("askedLoc", false) && notifAccessEnabled()) {
-            prefs.edit().putBoolean("askedLoc", true).apply()
-            requestPermissions(arrayOf(android.Manifest.permission.ACCESS_COARSE_LOCATION), REQ_LOC)
+        resumed = true
+        if (notifAccessEnabled()) {
+            // まだ聞いていない許可をまとめて1回だけ確認（位置・マイク・Bluetooth）
+            val need = ArrayList<String>()
+            fun ask(perm: String, flag: String) {
+                if (checkSelfPermission(perm) != android.content.pm.PackageManager.PERMISSION_GRANTED && !prefs.getBoolean(flag, false)) {
+                    need += perm; prefs.edit().putBoolean(flag, true).apply()
+                }
+            }
+            ask(android.Manifest.permission.ACCESS_COARSE_LOCATION, "askedLoc")
+            ask(android.Manifest.permission.RECORD_AUDIO, "askedMic")
+            if (Build.VERSION.SDK_INT >= 31) ask(android.Manifest.permission.BLUETOOTH_CONNECT, "askedBt")
+            if (need.isNotEmpty()) requestPermissions(need.toTypedArray(), REQ_LOC)
         }
+        updateTalkHint()
+        checkCarConnected()
+        startWake(1200)
         NotifService.sink = { onNotif(it, live = true) }
         startMedia()
         // ホーム以外にいた間に届いた通知（10分以内）
@@ -136,6 +155,8 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
     }
 
     override fun onDestroy() {
+        try { unregisterReceiver(btReceiver) } catch (e: Exception) { }
+        wakeRec?.destroy()
         stopSpeech(); reverb?.release()
         tts?.shutdown()
         super.onDestroy()
@@ -143,6 +164,8 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
 
     override fun onPause() {
         super.onPause()
+        resumed = false
+        stopWake()
         stopVisualizer()
         window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         stopMedia()
@@ -183,6 +206,11 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
         recentNotifs.removeAll { it.key == n.key }; recentNotifs.addFirst(n)
         while (recentNotifs.size > 6) recentNotifs.removeLast()
         if (assistant.isShowing) return
+        if (drive.isShowing) {
+            drive.lastNotice = "${n.appLabel}：${n.title}"
+            if (live) { SoundFx.play(SoundFx.Fx.ALERT); handler.postDelayed({ speakOut("${n.appLabel}、${n.title}。${n.text.take(60)}", "drive") }, 500) }
+            return
+        }
         alertQueue.removeAll { it.key == n.key }
         alertQueue.addLast(n)
         while (alertQueue.size > 6) alertQueue.removeFirst()
@@ -214,6 +242,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
 
     private fun onSpoken(id: String) {
         hud.speaking = false
+        if (!assistant.isShowing && !id.startsWith("alert:")) startWake(500)
         if (id.startsWith("alert:")) {
             val key = id.removePrefix("alert:")
             val n = alertQueue.firstOrNull()
@@ -228,6 +257,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
     private val NO = listOf("いいえ", "いや", "いらない", "閉じて", "とじて", "あとで", "後で", "結構", "けっこう", "大丈夫", "やめ", "キャンセル", "no", "ノー")
 
     private fun alertListen(n: NotifItem) {
+        stopWake()
         if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) != android.content.pm.PackageManager.PERMISSION_GRANTED) return
         if (!android.speech.SpeechRecognizer.isRecognitionAvailable(this)) return
         recognizer?.destroy()
@@ -239,11 +269,12 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
             override fun onRmsChanged(rms: Float) { alert.micLevel = ((rms + 2f) / 12f).coerceIn(0f, 1f); hud.voiceLevel = alert.micLevel * 0.6f }
             override fun onBufferReceived(b: ByteArray?) {}
             override fun onEndOfSpeech() { alert.micLevel = 0f }
-            override fun onError(error: Int) { alert.listening = false }
+            override fun onError(error: Int) { alert.listening = false; startWake(600) }
             override fun onPartialResults(b: Bundle?) {}
             override fun onEvent(t: Int, b: Bundle?) {}
             override fun onResults(b: Bundle?) {
                 alert.listening = false
+                startWake(800)
                 val all = b?.getStringArrayList(android.speech.SpeechRecognizer.RESULTS_RECOGNITION)?.joinToString(" ")?.lowercase().orEmpty()
                 if (!alert.isShowing || alertQueue.firstOrNull()?.key != n.key) return
                 when {
@@ -547,6 +578,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
         val t = tts ?: return
         if (!ttsReady) return
         stopSpeech()
+        stopWake()
         hud.speaking = true
         if (prefs.getBoolean("ttsFx", true)) {
             val f = java.io.File(cacheDir, "tts_out.wav")
@@ -653,7 +685,10 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
             .setItems(arrayOf("Claude APIキーを設定", "呼び名を変更（いま：${callName()}）", "声を選ぶ", "声の高さ・速さ",
                 "声のエフェクト（残響）：${if (prefs.getBoolean("ttsFx", true)) "ON" else "OFF"}", "読み上げエンジンを切り替え",
                 "会話をリセット", "アラーム一覧を開く", "ホームアプリを切り替え",
-                "画面の常時点灯：${arrayOf("常に", "充電中のみ", "OFF")[prefs.getInt("screenOn", 0)]}")) { _, w ->
+                "画面の常時点灯：${arrayOf("常に", "充電中のみ", "OFF")[prefs.getInt("screenOn", 0)]}",
+                "アシスタントの名前（いま：${aiName()}）",
+                "呼びかけ起動：${arrayOf("ホーム表示中", "充電中のみ", "OFF")[prefs.getInt("wakeMode", 0)]}",
+                "ドライブモードの車を設定", "ドライブモードを試す")) { _, w ->
                 when (w) {
                     0 -> askApiKey(); 1 -> askName(); 2 -> pickVoice(); 3 -> tuneVoice()
                     4 -> { val v = !prefs.getBoolean("ttsFx", true); prefs.edit().putBoolean("ttsFx", v).apply(); speakOut(sample(), "preview") }
@@ -664,6 +699,13 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
                         .setSingleChoiceItems(arrayOf("常に点灯（触らないと待機モードで暗くなります）", "充電中のみ常に点灯", "通常どおり自動で消灯"), prefs.getInt("screenOn", 0)) { d, which ->
                             prefs.edit().putInt("screenOn", which).apply(); applyKeepScreen(); d.dismiss()
                         }.show()
+                    10 -> askAiName()
+                    11 -> AlertDialog.Builder(this).setTitle("「${aiName()}」の呼びかけで起動")
+                        .setSingleChoiceItems(arrayOf("ホーム表示中はいつでも", "充電中のみ（電池にやさしい）", "OFF（タップだけ）"), prefs.getInt("wakeMode", 0)) { d, which ->
+                            prefs.edit().putInt("wakeMode", which).apply(); updateTalkHint(); stopWake(); startWake(500); d.dismiss()
+                        }.show()
+                    12 -> pickCar()
+                    13 -> { driveDismissed = false; enterDrive("TEST") }
                 }
             }.show()
     }
@@ -691,20 +733,238 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
             .setNegativeButton("キャンセル", null).show()
     }
 
-    private fun startAssistant() {
+    private fun startAssistant(initial: String? = null) {
         if (apiKey().isEmpty()) { askApiKey(); return }
         if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
             requestPermissions(arrayOf(android.Manifest.permission.RECORD_AUDIO), REQ_MIC); return
         }
+        stopWake()
         closeDrawer()
         hud.wake()
+        assistant.title = aiTag()
         assistant.open()
-        listen()
+        if (!initial.isNullOrBlank()) { assistant.heard = initial; think(initial) } else listen()
+    }
+
+    // ---------- assistant name & wake word ----------
+    private fun aiName() = prefs.getString("aiName", "アトラス") ?: "アトラス"
+    private fun aiTag(): String { val n = aiName(); return if (n == "アトラス") "ATLAS" else if (n.all { it.code < 128 }) n.uppercase() else n }
+
+    private fun kataToHira(s: String) = s.map { if (it in 'ァ'..'ヶ') (it.code - 0x60).toChar() else it }.joinToString("")
+    private fun wakeWords(): List<String> {
+        val n = aiName().lowercase()
+        val list = mutableListOf(n, kataToHira(n), aiTag().lowercase())
+        if (n == "アトラス") list += listOf("あとらす", "atlas", "アトラス", "あとらす")
+        return list.distinct().filter { it.length >= 2 }
+    }
+
+    private var wakeRec: android.speech.SpeechRecognizer? = null
+    private var wakeActive = false
+    private var resumed = false
+
+    private fun wakeAllowed(): Boolean {
+        val mode = prefs.getInt("wakeMode", 0)
+        return resumed && mode != 2 && (mode == 0 || hud.stats.charging) &&
+            checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED &&
+            !assistant.isShowing && !alert.listening && fxPlayer == null && apiKey().isNotEmpty()
+    }
+
+    private fun updateTalkHint() {
+        hud.talkHint = if (prefs.getInt("wakeMode", 0) != 2 && apiKey().isNotEmpty()) "SAY \"${aiTag()}\"  /  TAP" else "TAP TO TALK"
+    }
+
+    private fun startWake(delay: Long = 300) {
+        handler.removeCallbacks(wakeRunner)
+        handler.postDelayed(wakeRunner, delay)
+    }
+
+    private val wakeRunner = Runnable {
+        if (!wakeAllowed()) { wakeActive = false; return@Runnable }
+        if (!android.speech.SpeechRecognizer.isRecognitionAvailable(this)) return@Runnable
+        try {
+            if (wakeRec == null) {
+                wakeRec = if (Build.VERSION.SDK_INT >= 33 && android.speech.SpeechRecognizer.isOnDeviceRecognitionAvailable(this))
+                    android.speech.SpeechRecognizer.createOnDeviceSpeechRecognizer(this)
+                else android.speech.SpeechRecognizer.createSpeechRecognizer(this)
+            }
+            val r = wakeRec!!
+            wakeActive = true
+            r.setRecognitionListener(object : android.speech.RecognitionListener {
+                override fun onReadyForSpeech(p: Bundle?) {}
+                override fun onBeginningOfSpeech() {}
+                override fun onRmsChanged(rms: Float) {}
+                override fun onBufferReceived(b: ByteArray?) {}
+                override fun onEndOfSpeech() {}
+                override fun onEvent(t: Int, b: Bundle?) {}
+                override fun onPartialResults(b: Bundle?) { check(b, false) }
+                override fun onResults(b: Bundle?) { if (!check(b, true)) startWake(150) }
+                override fun onError(error: Int) {
+                    val busy = error == android.speech.SpeechRecognizer.ERROR_RECOGNIZER_BUSY || error == android.speech.SpeechRecognizer.ERROR_CLIENT
+                    if (busy) { wakeRec?.destroy(); wakeRec = null }
+                    startWake(if (busy) 1500 else 250)
+                }
+                private fun check(b: Bundle?, final: Boolean): Boolean {
+                    val text = b?.getStringArrayList(android.speech.SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull() ?: return false
+                    val low = text.lowercase()
+                    val w = wakeWords().firstOrNull { low.contains(it) } ?: return false
+                    if (!final) return false.also { } // 呼びかけの続き（命令）まで聞き切ってから動く
+                    val rest = text.substring((low.indexOf(w) + w.length).coerceAtMost(text.length)).trim(' ', '、', '。', ',', '!', '！', '?', '？')
+                    stopWake()
+                    SoundFx.play(SoundFx.Fx.LISTEN)
+                    startAssistant(if (rest.length >= 2) rest else null)
+                    return true
+                }
+            })
+            r.startListening(Intent(android.speech.RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+                .putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE_MODEL, android.speech.RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                .putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE, "ja-JP")
+                .putExtra(android.speech.RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+                .putExtra(android.speech.RecognizerIntent.EXTRA_PREFER_OFFLINE, true))
+        } catch (e: Exception) { wakeRec = null; startWake(3000) }
+    }
+
+    private fun stopWake() {
+        handler.removeCallbacks(wakeRunner)
+        try { wakeRec?.cancel() } catch (e: Exception) { }
+        wakeActive = false
+    }
+
+    private fun askAiName() {
+        val et = EditText(this).apply { setText(aiName()); setSingleLine() }
+        AlertDialog.Builder(this).setTitle("アシスタントの名前（呼びかけの言葉）")
+            .setMessage("3〜4音のはっきりした名前が聞き取りやすいです")
+            .setView(et)
+            .setPositiveButton("保存") { _, _ ->
+                val n = et.text.toString().trim(); if (n.isNotEmpty()) prefs.edit().putString("aiName", n).apply()
+                agent.reset(); updateTalkHint(); toast("「${aiName()}」と呼びかけてください")
+            }.setNegativeButton("キャンセル", null).show()
+    }
+
+    // ---------- drive mode ----------
+    private var driveDismissed = false
+    private var speedListener: android.location.LocationListener? = null
+    private val REQ_BT = 53
+    private val REQ_FINE = 54
+
+    private fun btGranted() = Build.VERSION.SDK_INT < 31 ||
+        checkSelfPermission(android.Manifest.permission.BLUETOOTH_CONNECT) == android.content.pm.PackageManager.PERMISSION_GRANTED
+
+    @Suppress("MissingPermission")
+    private fun isCar(d: android.bluetooth.BluetoothDevice?): Boolean {
+        d ?: return false
+        if (!btGranted()) return false
+        val saved = prefs.getString("carAddr", null)
+        if (saved != null) return d.address == saved
+        val cls = d.bluetoothClass?.deviceClass
+        val name = (d.name ?: "").lowercase()
+        return cls == android.bluetooth.BluetoothClass.Device.AUDIO_VIDEO_CAR_AUDIO ||
+            cls == android.bluetooth.BluetoothClass.Device.AUDIO_VIDEO_HANDSFREE ||
+            name.contains("tesla") || name.contains("model ") || name.contains("car")
+    }
+
+    private val btReceiver = object : android.content.BroadcastReceiver() {
+        @Suppress("MissingPermission")
+        override fun onReceive(ctx: Context, i: Intent) {
+            val d: android.bluetooth.BluetoothDevice? = if (Build.VERSION.SDK_INT >= 33)
+                i.getParcelableExtra(android.bluetooth.BluetoothDevice.EXTRA_DEVICE, android.bluetooth.BluetoothDevice::class.java)
+            else @Suppress("DEPRECATION") i.getParcelableExtra(android.bluetooth.BluetoothDevice.EXTRA_DEVICE)
+            if (!isCar(d)) return
+            when (i.action) {
+                android.bluetooth.BluetoothDevice.ACTION_ACL_CONNECTED -> {
+                    if (prefs.getString("carAddr", null) == null && d != null) prefs.edit().putString("carAddr", d.address).apply()
+                    driveDismissed = false; enterDrive(d?.name ?: "")
+                }
+                android.bluetooth.BluetoothDevice.ACTION_ACL_DISCONNECTED -> { driveDismissed = false; exitDrive() }
+            }
+        }
+    }
+
+    @Suppress("MissingPermission")
+    private fun checkCarConnected() {
+        if (!btGranted() || driveDismissed) return
+        val ad = (getSystemService(BLUETOOTH_SERVICE) as android.bluetooth.BluetoothManager).adapter ?: return
+        for (profile in listOf(android.bluetooth.BluetoothProfile.HEADSET, android.bluetooth.BluetoothProfile.A2DP)) {
+            try {
+                ad.getProfileProxy(this, object : android.bluetooth.BluetoothProfile.ServiceListener {
+                    override fun onServiceConnected(p: Int, proxy: android.bluetooth.BluetoothProfile) {
+                        val car = proxy.connectedDevices.firstOrNull { isCar(it) }
+                        if (car != null && !drive.isShowing && !driveDismissed) enterDrive(car.name ?: "")
+                        ad.closeProfileProxy(p, proxy)
+                    }
+                    override fun onServiceDisconnected(p: Int) {}
+                }, profile)
+            } catch (e: Exception) { }
+        }
+    }
+
+    private fun enterDrive(name: String) {
+        if (drive.isShowing) return
+        closeDrawer()
+        drive.carName = name; drive.assistantName = aiName()
+        drive.stats = hud.stats; drive.media = hud.media
+        drive.open()
+        moduleFrame.visibility = View.INVISIBLE
+        startSpeed()
+        if (ttsReady) speakOut("ドライブモードに切り替えました。安全運転でどうぞ。", "drive")
+    }
+
+    private fun exitDrive() {
+        if (!drive.isShowing) return
+        drive.close(); stopSpeed()
+        moduleFrame.visibility = View.VISIBLE
+    }
+
+    @Suppress("MissingPermission")
+    private fun startSpeed() {
+        if (checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            if (!prefs.getBoolean("askedFine", false)) { prefs.edit().putBoolean("askedFine", true).apply(); requestPermissions(arrayOf(android.Manifest.permission.ACCESS_FINE_LOCATION), REQ_FINE) }
+            return
+        }
+        val lm = getSystemService(LOCATION_SERVICE) as android.location.LocationManager
+        val l = android.location.LocationListener { loc -> drive.speedKmh = if (loc.hasSpeed()) loc.speed * 3.6f else -1f }
+        speedListener = l
+        try { lm.requestLocationUpdates(android.location.LocationManager.GPS_PROVIDER, 1000L, 0f, l, mainLooper) } catch (e: Exception) { }
+    }
+
+    private fun stopSpeed() {
+        speedListener?.let { (getSystemService(LOCATION_SERVICE) as android.location.LocationManager).removeUpdates(it) }
+        speedListener = null; drive.speedKmh = -1f
+    }
+
+    override fun onDriveAction(action: String) {
+        when (action) {
+            "exit" -> { driveDismissed = true; exitDrive() }
+            "talk" -> startAssistant()
+            "nav" -> safeStart(packageManager.getLaunchIntentForPackage("com.google.android.apps.maps") ?: Intent(Intent.ACTION_VIEW, android.net.Uri.parse("geo:0,0?q=")))
+            "phone" -> safeStart(Intent(Intent.ACTION_DIAL))
+            "music" -> {
+                val c = controller
+                if (c != null) onMediaAction("open")
+                else safeStart(Intent.makeMainSelectorActivity(Intent.ACTION_MAIN, Intent.CATEGORY_APP_MUSIC))
+            }
+            "prev", "toggle", "next" -> onMediaAction(action)
+        }
+    }
+
+    @Suppress("MissingPermission")
+    private fun pickCar() {
+        if (!btGranted()) { requestPermissions(arrayOf(android.Manifest.permission.BLUETOOTH_CONNECT), REQ_BT); return }
+        val ad = (getSystemService(BLUETOOTH_SERVICE) as android.bluetooth.BluetoothManager).adapter
+        val devs = ad?.bondedDevices?.toList() ?: emptyList()
+        if (devs.isEmpty()) { toast("ペアリング済みの機器がありません"); return }
+        val names = (listOf("自動（車載機器を自動判定）") + devs.map { it.name ?: it.address }).toTypedArray()
+        AlertDialog.Builder(this).setTitle("ドライブモードを起動する車")
+            .setItems(names) { _, w ->
+                if (w == 0) prefs.edit().remove("carAddr").apply() else prefs.edit().putString("carAddr", devs[w - 1].address).apply()
+                toast("設定しました")
+            }.show()
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == REQ_LOC) { lastWeather = 0; fetchWeather(); return }
+        if (requestCode == REQ_LOC) { lastWeather = 0; fetchWeather(); checkCarConnected(); startVisualizer(); startWake(800); return }
+        if (requestCode == REQ_BT) { if (btGranted()) { checkCarConnected(); pickCar() }; return }
+        if (requestCode == REQ_FINE) { if (drive.isShowing) startSpeed(); return }
         if (requestCode == REQ_MIC) {
             if (grantResults.firstOrNull() == android.content.pm.PackageManager.PERMISSION_GRANTED) startAssistant()
             else toast("マイクの許可がないと話しかけられません")
@@ -765,7 +1025,8 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
         val media = if (m == null) "なし" else "${m.title} / ${m.artist}（${if (m.playing) "再生中" else "一時停止"}）"
         val notifs = recentNotifs.mapIndexed { i, n -> "${i + 1}. ${n.appLabel}：${n.title}" }.joinToString("\n").ifEmpty { "なし" }
         val appNames = apps.joinToString("、") { it.label }
-        return """あなたは${callName()}のスマートフォン（Galaxy Z Fold7）のホーム画面に組み込まれたAIアシスタント、Claudeです。
+        return """あなたは${callName()}のスマートフォン（Galaxy Z Fold7）のホーム画面に組み込まれたAIアシスタント「${aiName()}」です（中身はAnthropicのClaude）。名前を聞かれたら${aiName()}と名乗ってください。
+${if (drive.isShowing) "現在${callName()}は運転中です。返答はとくに短く、画面を見なくて済む内容にし、運転の妨げになる操作は勧めないでください。" else ""}
 映画に出てくる有能なAI執事のように、落ち着いて丁寧、ときどき軽いウィットを交えて話してください。相手は「${callName()}」と呼びます。
 返答は音声で読み上げられます。話し言葉で1〜3文に短くまとめ、記号・箇条書き・絵文字・URLは使わないでください。
 端末の操作が必要なときはツールを使い、実行後は結果をひとことで伝えてください。わからないことや最新情報は推測で断言せず、必要ならweb_searchを使ってください。
@@ -874,6 +1135,7 @@ $notifs
         SoundFx.play(SoundFx.Fx.BACK)
         recognizer?.cancel(); stopSpeech()
         assistant.close()
+        startWake(600)
     }
 
     // ---------- media ----------
@@ -914,17 +1176,18 @@ $notifs
     private fun pushMedia() {
         val c = controller
         val md = c?.metadata
-        if (c == null || md == null) { hud.media = null; return }
+        if (c == null || md == null) { hud.media = null; drive.media = null; return }
         val st = c.playbackState
         val title = md.getString(android.media.MediaMetadata.METADATA_KEY_TITLE) ?: md.getString(android.media.MediaMetadata.METADATA_KEY_DISPLAY_TITLE) ?: ""
         val artist = md.getString(android.media.MediaMetadata.METADATA_KEY_ARTIST) ?: md.getString(android.media.MediaMetadata.METADATA_KEY_ALBUM) ?: ""
         val art = md.getBitmap(android.media.MediaMetadata.METADATA_KEY_ALBUM_ART) ?: md.getBitmap(android.media.MediaMetadata.METADATA_KEY_ART)
             ?: md.getBitmap(android.media.MediaMetadata.METADATA_KEY_DISPLAY_ICON)
-        if (title.isEmpty() && artist.isEmpty()) { hud.media = null; return }
+        if (title.isEmpty() && artist.isEmpty()) { hud.media = null; drive.media = null; return }
         hud.media = MediaInfo(title, artist, art,
             st?.state == android.media.session.PlaybackState.STATE_PLAYING,
             md.getLong(android.media.MediaMetadata.METADATA_KEY_DURATION),
             st?.position ?: 0L, st?.lastPositionUpdateTime ?: android.os.SystemClock.elapsedRealtime(), st?.playbackSpeed ?: 1f)
+        drive.media = hud.media
     }
 
     override fun onMediaAction(action: String) {
@@ -1121,6 +1384,7 @@ $notifs
             s.rxHist = rxHist.toList(); s.txHist = txHist.toList()
             s.memHist = memHist.toList(); s.battHist = battHist.toList()
             hud.stats = s
+            drive.stats = s
             tick++
             if (System.currentTimeMillis() - lastWeather > 30 * 60 * 1000) fetchWeather()
             handler.postDelayed(this, 1000)
