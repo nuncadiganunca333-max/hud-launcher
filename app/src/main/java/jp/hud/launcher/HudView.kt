@@ -477,17 +477,47 @@ class HudView(context: Context) : View(context), SensorEventListener {
         val lw = label.measureText("◆ HUD//OS  ")
         label.textSize = unit * 0.45f
         label.color = if (notifLink) cyan(170) else RED
-        val linkTxt = if (notifLink) "NOTIFY LINK ● ONLINE" + (if (voiceOn) "  VOICE ON" else "  VOICE OFF") else "NOTIFY LINK ○ OFFLINE  (TAP)"
+        val linkTxt = if (wide) {
+            if (notifLink) "NOTIFY LINK ● ONLINE" + (if (voiceOn) "  VOICE ON" else "  VOICE OFF") else "NOTIFY LINK ○ OFFLINE  (TAP)"
+        } else {
+            if (notifLink) "● LINK" + (if (voiceOn) " VOICE" else "") else "○ LINK (TAP)"
+        }
         c.drawText(linkTxt, r.left + lw, base, label)
         val linkW = label.measureText(linkTxt)
         label.letterSpacing = 0f
         mono.textAlign = Paint.Align.RIGHT; mono.textSize = unit * 0.62f; mono.color = CYAN
         val wd = arrayOf("SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT")[now.get(Calendar.DAY_OF_WEEK) - 1]
-        val st = String.format(Locale.US, "%04d.%02d.%02d %s %02d:%02d:%02d", now.get(Calendar.YEAR), now.get(Calendar.MONTH) + 1,
+        val st = if (wide) String.format(Locale.US, "%04d.%02d.%02d %s %02d:%02d:%02d", now.get(Calendar.YEAR), now.get(Calendar.MONTH) + 1,
             now.get(Calendar.DAY_OF_MONTH), wd, now.get(Calendar.HOUR_OF_DAY), now.get(Calendar.MINUTE), now.get(Calendar.SECOND))
+            else String.format(Locale.US, "%s %02d:%02d", wd, now.get(Calendar.HOUR_OF_DAY), now.get(Calendar.MINUTE))
         c.drawText(st, r.right, base, mono)
+        // battery indicator
+        run {
+            val s = stats
+            val low = s.battery <= 20 && !s.charging
+            val col = if (low) RED else CYAN
+            val bw = unit * 1.5f; val bh = unit * 0.72f
+            val bx2 = r.right - mono.measureText(st) - unit * 0.9f
+            val bx1 = bx2 - bw; val by1 = base - bh * 0.95f
+            stroke.strokeWidth = 2.5f; stroke.color = col
+            c.drawRoundRect(bx1, by1, bx2, by1 + bh, 4f, 4f, stroke)
+            fill.color = col
+            c.drawRect(bx2 + 1, by1 + bh * 0.3f, bx2 + unit * 0.14f, by1 + bh * 0.7f, fill)
+            val inner = (bw - 8f) * (dBatt / 100f).coerceIn(0f, 1f)
+            glow.strokeWidth = 6f; glow.color = withA(col, 120)
+            c.drawRect(bx1 + 4, by1 + 4, bx1 + 4 + inner, by1 + bh - 4, glow)
+            c.drawRect(bx1 + 4, by1 + 4, bx1 + 4 + inner, by1 + bh - 4, fill)
+            if (s.charging) {
+                label.textAlign = Paint.Align.CENTER; label.textSize = bh * 0.85f; label.color = Color.WHITE
+                c.drawText("⚡", (bx1 + bx2) / 2, by1 + bh * 0.82f, label); label.color = CYAN
+            }
+            mono.textAlign = Paint.Align.RIGHT; mono.textSize = unit * 0.62f; mono.color = col
+            c.drawText("${dBatt.roundToInt()}%", bx1 - unit * 0.25f, base, mono)
+            mono.color = CYAN; mono.textAlign = Paint.Align.RIGHT
+            mono.textSize = unit * 0.62f
+        }
         if (wide) {
-            val free = (r.right - mono.measureText(st)) - (r.left + lw + linkW) - unit * 2
+            val free = (r.right - mono.measureText(st) - unit * 5f) - (r.left + lw + linkW) - unit * 2
             mono.textAlign = Paint.Align.LEFT; mono.textSize = unit * 0.42f; mono.color = cyan(100)
             var hs = hexStream((t * 6).toLong(), 40)
             while (mono.measureText(hs) > free && hs.length > 4) hs = hs.dropLast(5)
@@ -642,8 +672,10 @@ class HudView(context: Context) : View(context), SensorEventListener {
         thin.textSize = big; textGlow.textSize = big
         c.drawText(hm, cx, cy + big * 0.33f, textGlow); c.drawText(hm, cx, cy + big * 0.33f, thin)
         mono.textAlign = Paint.Align.CENTER; mono.textSize = coreR * 0.06f; mono.color = cyan(210)
-        c.drawText(String.format(Locale.US, "%02d.%02d  SEC %02d", now.get(Calendar.MONTH) + 1, now.get(Calendar.DAY_OF_MONTH), sec.toInt()),
-            cx, cy - big * 0.62f, mono)
+        mono.color = if (stats.battery <= 20 && !stats.charging) RED else cyan(220)
+        c.drawText(String.format(Locale.US, "%02d.%02d  %sBATT %d%%", now.get(Calendar.MONTH) + 1, now.get(Calendar.DAY_OF_MONTH),
+            if (stats.charging) "⚡" else "", dBatt.roundToInt()), cx, cy - big * 0.62f, mono)
+        mono.color = cyan(210)
         val wd = now.get(Calendar.DAY_OF_WEEK) - 1
         label.textAlign = Paint.Align.CENTER; label.textSize = coreR * 0.065f; label.color = cyan(220); label.letterSpacing = 0.25f
         c.drawText(arrayOf("SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY")[wd], cx, cy + big * 0.95f, label)
