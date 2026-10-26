@@ -586,7 +586,27 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
     private fun sample() = "お呼びでしょうか、${callName()}。本日もすべてのシステムは正常です。"
 
     /** 読み上げ。エフェクトONなら一度ファイルに合成して残響をかけて再生 */
+    private var speakSeq = 0
+
     private fun speakOut(text: String, id: String) {
+        if (useEleven()) {
+            stopSpeech(); stopWake(); hud.speaking = true
+            val seq = ++speakSeq
+            thread {
+                val f = java.io.File(cacheDir, "el_out_${seq % 2}.mp3")
+                val ok = elevenTts(text, f)
+                runOnUiThread {
+                    if (seq != speakSeq) return@runOnUiThread   // 新しい発話に置き換わった
+                    if (ok) playWithFx(f, id)
+                    else { toast("ElevenLabsで読み上げできなかったので、スマホの声で話します"); speakDevice(text, id) }
+                }
+            }
+            return
+        }
+        speakDevice(text, id)
+    }
+
+    private fun speakDevice(text: String, id: String) {
         val t = tts ?: return
         if (!ttsReady) return
         stopSpeech()
@@ -621,7 +641,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
                 .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH).build())
             mp.setDataSource(f.path)
             mp.prepare()
-            reverb?.let { mp.attachAuxEffect(it.id); mp.setAuxEffectSendLevel(0.32f) }
+            if (voiceStyle() > 0) reverb?.let { mp.attachAuxEffect(it.id); mp.setAuxEffectSendLevel(if (useEleven()) 0.22f else 0.32f) }
             mp.setOnCompletionListener { it.release(); if (fxPlayer === it) fxPlayer = null; onSpoken(id) }
             fxPlayer = mp
             mp.start()
@@ -631,7 +651,91 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
         }
     }
 
+    // ---------- ElevenLabs ----------
+    private fun elKey() = prefs.getString("elKey", "") ?: ""
+    private fun useEleven() = prefs.getString("ttsProvider", "device") == "eleven" && elKey().isNotEmpty() && !prefs.getString("elVoiceId", "").isNullOrEmpty()
+
+    /** ElevenLabs で音声を作って mp3 に保存（バックグラウンドで呼ぶ） */
+    private fun elevenTts(text: String, out: java.io.File, voiceId: String? = null): Boolean = try {
+        val vid = voiceId ?: prefs.getString("elVoiceId", "")!!
+        val con = URL("https://api.elevenlabs.io/v1/text-to-speech/$vid?output_format=mp3_44100_128").openConnection() as HttpURLConnection
+        con.requestMethod = "POST"; con.doOutput = true; con.connectTimeout = 10000; con.readTimeout = 30000
+        con.setRequestProperty("xi-api-key", elKey())
+        con.setRequestProperty("content-type", "application/json")
+        con.setRequestProperty("accept", "audio/mpeg")
+        val body = JSONObject().put("text", text).put("model_id", prefs.getString("elModel", "eleven_v4_turbo"))
+            .put("voice_settings", JSONObject().put("stability", 0.55).put("similarity_boost", 0.8).put("style", 0.15))
+        con.outputStream.use { it.write(body.toString().toByteArray()) }
+        if (con.responseCode in 200..299) { con.inputStream.use { inp -> out.outputStream().use { inp.copyTo(it) } }; true }
+        else false
+    } catch (e: Exception) { false }
+
+    private fun setupEleven() {
+        val et = EditText(this).apply {
+            hint = "ElevenLabs APIキー"; setSingleLine(); setText(elKey())
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+        }
+        AlertDialog.Builder(this).setTitle("ElevenLabs APIキー")
+            .setMessage("ElevenLabsにログインし、設定のAPIキー画面で発行したキーを貼り付けてください。キーはこの端末の中にだけ保存されます。")
+            .setView(et)
+            .setPositiveButton("次へ（声を選ぶ）") { _, _ -> prefs.edit().putString("elKey", et.text.toString().trim()).apply(); pickElevenVoice() }
+            .setNeutralButton("ElevenLabsを開く") { _, _ -> safeStart(Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://elevenlabs.io/app/settings/api-keys"))) }
+            .setNegativeButton("キャンセル", null).show()
+    }
+
+    private fun pickElevenVoice() {
+        if (elKey().isEmpty()) { setupEleven(); return }
+        toast("声の一覧を取得しています…")
+        thread {
+            val list = try {
+                val con = URL("https://api.elevenlabs.io/v1/voices").openConnection() as HttpURLConnection
+                con.setRequestProperty("xi-api-key", elKey()); con.connectTimeout = 10000; con.readTimeout = 20000
+                if (con.responseCode !in 200..299) null else {
+                    val arr = JSONObject(con.inputStream.bufferedReader().readText()).getJSONArray("voices")
+                    (0 until arr.length()).map { arr.getJSONObject(it) }
+                }
+            } catch (e: Exception) { null }
+            runOnUiThread {
+                if (list == null) { toast("取得できませんでした。APIキーを確認してください"); return@runOnUiThread }
+                // 男性・低め・落ち着いた声を上に
+                fun score(v: JSONObject): Int {
+                    val l = v.optJSONObject("labels"); val txt = (l?.toString() ?: "").lowercase() + " " + v.optString("description").lowercase()
+                    var sc = 0
+                    if (txt.contains("male") && !txt.contains("female")) sc -= 10
+                    listOf("deep", "calm", "british", "narrat", "authoritative", "middle").forEach { if (txt.contains(it)) sc -= 2 }
+                    return sc
+                }
+                val voices = list.sortedBy { score(it) }
+                val labels = voices.map { v ->
+                    val l = v.optJSONObject("labels")
+                    val tags = listOfNotNull(l?.optString("gender")?.takeIf { it.isNotEmpty() }, l?.optString("age")?.takeIf { it.isNotEmpty() },
+                        l?.optString("accent")?.takeIf { it.isNotEmpty() }, l?.optString("description")?.takeIf { it.isNotEmpty() }).joinToString(" / ")
+                    "${v.optString("name")}\n$tags"
+                }.toTypedArray()
+                var chosen = voices.indexOfFirst { it.optString("voice_id") == prefs.getString("elVoiceId", "") }.coerceAtLeast(0)
+                AlertDialog.Builder(this).setTitle("ElevenLabsの声（タップで試聴）")
+                    .setSingleChoiceItems(labels, chosen) { _, w ->
+                        chosen = w
+                        val vid = voices[w].optString("voice_id")
+                        stopSpeech(); val seq = ++speakSeq
+                        thread {
+                            val f = java.io.File(cacheDir, "el_preview.mp3")
+                            val ok = elevenTts(sample(), f, vid)
+                            runOnUiThread { if (seq == speakSeq) { if (ok) playWithFx(f, "preview") else toast("試聴できませんでした（残りの文字数やキーを確認してください）") } }
+                        }
+                    }
+                    .setPositiveButton("この声にする") { _, _ ->
+                        prefs.edit().putString("elVoiceId", voices[chosen].optString("voice_id"))
+                            .putString("elVoiceName", voices[chosen].optString("name")).putString("ttsProvider", "eleven").apply()
+                        toast("${voices[chosen].optString("name")} の声に切り替えました")
+                    }
+                    .setNegativeButton("キャンセル", null).show()
+            }
+        }
+    }
+
     private fun stopSpeech() {
+        speakSeq++
         tts?.stop()
         if (::hud.isInitialized) hud.speaking = false
         fxPlayer?.let { try { it.stop() } catch (e: Exception) { }; it.release() }
@@ -701,15 +805,17 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
 
     override fun onCoreLongPress() {
         AlertDialog.Builder(this).setTitle("HUD 設定")
-            .setItems(arrayOf("Claude APIキーを設定", "呼び名を変更（いま：${callName()}）", "声を選ぶ", "声の高さ・速さ",
+            .setItems(arrayOf("Claude APIキーを設定", "呼び名を変更（いま：${callName()}）",
+                if (useEleven()) "声を選ぶ（ElevenLabs：${prefs.getString("elVoiceName", "")}）" else "声を選ぶ（スマホの声）", "声の高さ・速さ（スマホの声）",
                 "声の加工：${arrayOf("ナチュラル", "AIボイス", "AIボイス強め")[voiceStyle()]}", "読み上げエンジンを切り替え",
                 "会話をリセット", "アラーム一覧を開く", "ホームアプリを切り替え",
                 "画面の常時点灯：${arrayOf("常に", "充電中のみ", "OFF")[prefs.getInt("screenOn", 0)]}",
                 "アシスタントの名前（いま：${aiName()}）",
                 "呼びかけ起動：${arrayOf("開いて10秒", "10秒＋充電・運転中", "OFF")[prefs.getInt("wakeMode2", 0)]}",
-                "ドライブモードの車を設定", "ドライブモードを試す")) { _, w ->
+                "ドライブモードの車を設定", "ドライブモードを試す",
+                "声のサービス：${if (useEleven()) "ElevenLabs" else "スマホ"}")) { _, w ->
                 when (w) {
-                    0 -> askApiKey(); 1 -> askName(); 2 -> pickVoice(); 3 -> tuneVoice()
+                    0 -> askApiKey(); 1 -> askName(); 2 -> if (useEleven()) pickElevenVoice() else pickVoice(); 3 -> tuneVoice()
                     4 -> AlertDialog.Builder(this).setTitle("声の加工")
                         .setSingleChoiceItems(arrayOf("ナチュラル（加工なし）", "AIボイス（低音＋金属的な響き＋残響）", "AIボイス・強め"), voiceStyle()) { d, which ->
                             prefs.edit().putInt("voiceStyle", which).apply(); d.dismiss(); speakOut(sample(), "preview")
@@ -728,6 +834,10 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
                         }.show()
                     12 -> pickCar()
                     13 -> { driveDismissed = false; enterDrive("TEST") }
+                    14 -> AlertDialog.Builder(this).setTitle("声のサービス")
+                        .setItems(arrayOf("ElevenLabs（高品質・要APIキー）", "スマホの読み上げ（無料・オフラインでも可）")) { _, which ->
+                            if (which == 0) setupEleven() else { prefs.edit().putString("ttsProvider", "device").apply(); toast("スマホの声に戻しました") }
+                        }.show()
                 }
             }.show()
     }
