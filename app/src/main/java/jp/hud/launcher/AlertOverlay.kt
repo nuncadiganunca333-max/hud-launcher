@@ -16,7 +16,7 @@ import kotlin.math.sin
 class AlertOverlay(context: Context) : View(context) {
 
     interface Listener {
-        fun onAlertOpen(item: NotifItem)
+        fun onAlertOpen(item: NotifItem, src: android.graphics.Rect?)
         fun onAlertDismiss(item: NotifItem)
     }
 
@@ -32,6 +32,7 @@ class AlertOverlay(context: Context) : View(context) {
     private fun cyan(a: Int) = Color.argb(a.coerceIn(0, 255), 0, 229, 255)
 
     private val panel = RectF()
+    private val iconRect = RectF()
     private val openR = RectF()
     private val dismissR = RectF()
 
@@ -67,7 +68,27 @@ class AlertOverlay(context: Context) : View(context) {
         val age = System.currentTimeMillis() - shownAt
         if (age > timeoutMs) { listener?.onAlertDismiss(n); return }
         val t = age / 1000f
-        val appear = min(1f, age / 350f)
+        val zoomMs = 750f
+        if (age < zoomMs) {
+            val p = age / zoomMs
+            fill.color = Color.argb((170 * min(1f, p * 3)).toInt(), 0, 4, 10); c.drawRect(0f, 0f, W, H, fill)
+            val u0 = min(W, H)
+            val sz = u0 * (0.12f + 0.28f * sin(min(1f, p * 1.4f) * Math.PI.toFloat() / 2))
+            val zx = W / 2; val zy = H * 0.42f
+            for (k in 0 until 3) {
+                val q = ((p * 1.6f) - k * 0.2f).coerceIn(0f, 1f)
+                glow.strokeWidth = 12f; glow.color = cyan((200 * (1 - q)).toInt()); c.drawCircle(zx, zy, sz * (0.6f + q * 1.4f), glow)
+                stroke.strokeWidth = 3f; stroke.color = cyan((255 * (1 - q)).toInt()); c.drawCircle(zx, zy, sz * (0.6f + q * 1.4f), stroke)
+            }
+            stroke.strokeWidth = 4f; stroke.color = CYAN
+            val rr = RectF(zx - sz * 0.75f, zy - sz * 0.75f, zx + sz * 0.75f, zy + sz * 0.75f)
+            c.drawArc(rr, p * 400f, 80f, false, stroke); c.drawArc(rr, p * 400f + 180f, 80f, false, stroke)
+            icon?.let { it.setBounds((zx - sz / 2).toInt(), (zy - sz / 2).toInt(), (zx + sz / 2).toInt(), (zy + sz / 2).toInt()); it.draw(c) }
+            label.textAlign = Paint.Align.CENTER; label.textSize = u0 / 30f * 1.1f; label.letterSpacing = 0.3f; label.color = CYAN
+            c.drawText(n.appLabel.uppercase(), zx, zy + sz * 0.95f, label); label.letterSpacing = 0f
+            postInvalidateOnAnimation(); return
+        }
+        val appear = min(1f, (age - zoomMs) / 300f)
 
         fill.color = Color.argb((170 * appear).toInt(), 0, 4, 10); c.drawRect(0f, 0f, W, H, fill)
 
@@ -107,6 +128,7 @@ class AlertOverlay(context: Context) : View(context) {
         // icon with rotating ring
         val ir = u * 1.9f
         val icx = panel.left + u * 0.9f + ir; val icy = panel.top + hh + u * 0.9f + ir
+        iconRect.set(icx - ir, icy - ir, icx + ir, icy + ir)
         stroke.strokeWidth = 2f; stroke.color = cyan(160); c.drawCircle(icx, icy, ir, stroke)
         stroke.strokeWidth = 5f; stroke.color = CYAN
         val rr = RectF(icx - ir * 1.18f, icy - ir * 1.18f, icx + ir * 1.18f, icy + ir * 1.18f)
@@ -167,7 +189,7 @@ class AlertOverlay(context: Context) : View(context) {
         val n = item ?: return false
         if (e.action == MotionEvent.ACTION_UP) {
             when {
-                openR.contains(e.x, e.y) -> listener?.onAlertOpen(n)
+                openR.contains(e.x, e.y) -> listener?.onAlertOpen(n, iconRect.let { android.graphics.Rect(it.left.toInt(), it.top.toInt(), it.right.toInt(), it.bottom.toInt()) })
                 dismissR.contains(e.x, e.y) -> listener?.onAlertDismiss(n)
                 !panel.contains(e.x, e.y) -> listener?.onAlertDismiss(n)
             }

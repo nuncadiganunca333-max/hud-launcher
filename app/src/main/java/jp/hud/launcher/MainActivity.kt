@@ -55,6 +55,13 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener {
     private val handler = Handler(Looper.getMainLooper())
     private var lastWeather = 0L
     private lateinit var alert: AlertOverlay
+    private lateinit var moduleFrame: FrameLayout
+    private lateinit var widgetHost: android.appwidget.AppWidgetHost
+    private var widgetView: android.appwidget.AppWidgetHostView? = null
+    private var moduleRect = android.graphics.RectF()
+    private var pendingWidgetId = -1
+    private val REQ_BIND = 41
+    private val REQ_CONFIG = 42
     private val alertQueue = ArrayDeque<NotifItem>()
     private var tts: TextToSpeech? = null
     private var ttsReady = false
@@ -71,6 +78,10 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener {
         val root = FrameLayout(this)
         hud = HudView(this).also { it.listener = this }
         root.addView(hud, FrameLayout.LayoutParams(-1, -1))
+        moduleFrame = FrameLayout(this)
+        root.addView(moduleFrame, FrameLayout.LayoutParams(-1, -1))
+        widgetHost = android.appwidget.AppWidgetHost(this, 4711)
+        restoreWidget()
         alert = AlertOverlay(this).also { it.listener = this }
         root.addView(alert, FrameLayout.LayoutParams(-1, -1))
         drawer = buildDrawer()
@@ -169,15 +180,16 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener {
         tts?.speak("${n.appLabel}${who}の通知です。開きますか？", TextToSpeech.QUEUE_FLUSH, null, n.key)
     }
 
-    override fun onAlertOpen(item: NotifItem) {
+    override fun onAlertOpen(item: NotifItem, src: android.graphics.Rect?) {
         tts?.stop()
         alertQueue.removeAll { it.key == item.key }
         alert.hide()
         var ok = false
         item.intent?.let {
             try {
-                val opts = if (Build.VERSION.SDK_INT >= 34) ActivityOptions.makeBasic()
-                    .setPendingIntentBackgroundActivityStartMode(ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED).toBundle() else null
+                val ao = if (src != null) ActivityOptions.makeClipRevealAnimation(hud, src.left, src.top, src.width(), src.height()) else ActivityOptions.makeBasic()
+                if (Build.VERSION.SDK_INT >= 34) ao.setPendingIntentBackgroundActivityStartMode(ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED)
+                val opts = ao.toBundle()
                 it.send(this, 0, null, null, null, null, opts); ok = true
             } catch (e: Exception) { }
         }
@@ -245,6 +257,116 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener {
             } catch (e: Exception) { toast("起動できませんでした") }
         }
         if (delayMs > 0) handler.postDelayed(go, delayMs) else go.run()
+    }
+
+    // ---------- module (hosted app widget, e.g. Tesla) ----------
+    override fun onStart() { super.onStart(); try { widgetHost.startListening() } catch (e: Exception) { } }
+    override fun onStop() { super.onStop(); try { widgetHost.stopListening() } catch (e: Exception) { } }
+
+    override fun onModuleRect(r: android.graphics.RectF) { moduleRect = android.graphics.RectF(r); placeWidget() }
+
+    private fun placeWidget() {
+        val v = widgetView ?: return
+        if (moduleRect.isEmpty) return
+        val lp = FrameLayout.LayoutParams(moduleRect.width().toInt(), moduleRect.height().toInt())
+        lp.leftMargin = moduleRect.left.toInt(); lp.topMargin = moduleRect.top.toInt()
+        v.layoutParams = lp
+        val d = resources.displayMetrics.density
+        val wdp = (moduleRect.width() / d).toInt(); val hdp = (moduleRect.height() / d).toInt()
+        @Suppress("DEPRECATION")
+        v.updateAppWidgetSize(null, wdp, hdp, wdp, hdp)
+    }
+
+    private fun restoreWidget() {
+        val id = prefs.getInt("widgetId", -1)
+        if (id == -1) { hud.moduleLinked = false; return }
+        val info = android.appwidget.AppWidgetManager.getInstance(this).getAppWidgetInfo(id)
+        if (info == null) { prefs.edit().remove("widgetId").apply(); hud.moduleLinked = false; return }
+        showWidget(id, info)
+    }
+
+    private fun showWidget(id: Int, info: android.appwidget.AppWidgetProviderInfo) {
+        moduleFrame.removeAllViews()
+        val v = widgetHost.createView(applicationContext, id, info)
+        v.setAppWidget(id, info)
+        moduleFrame.addView(v)
+        widgetView = v
+        prefs.edit().putInt("widgetId", id).apply()
+        hud.moduleLinked = true
+        placeWidget()
+    }
+
+    private fun removeWidget() {
+        val id = prefs.getInt("widgetId", -1)
+        if (id != -1) widgetHost.deleteAppWidgetId(id)
+        prefs.edit().remove("widgetId").apply()
+        moduleFrame.removeAllViews(); widgetView = null
+        hud.moduleLinked = false
+    }
+
+    override fun onModuleEdit() {
+        if (prefs.getInt("widgetId", -1) != -1) {
+            AlertDialog.Builder(this).setTitle("MODULE")
+                .setItems(arrayOf("ウィジェットを変更", "ウィジェットを外す")) { _, w -> if (w == 0) pickWidget() else removeWidget() }
+                .show()
+        } else pickWidget()
+    }
+
+    private fun pickWidget() {
+        val awm = android.appwidget.AppWidgetManager.getInstance(this)
+        val providers = awm.installedProviders.sortedWith(compareBy(
+            { if (it.provider.packageName.contains("tesla", true)) 0 else 1 },
+            { it.loadLabel(packageManager).lowercase() }))
+        if (providers.isEmpty()) { toast("追加できるウィジェットがありません"); return }
+        val names = providers.map {
+            val app = try { packageManager.getApplicationLabel(packageManager.getApplicationInfo(it.provider.packageName, 0)).toString() } catch (e: Exception) { "" }
+            "$app ／ ${it.loadLabel(packageManager)}"
+        }.toTypedArray()
+        AlertDialog.Builder(this).setTitle("MODULEに入れるウィジェット")
+            .setItems(names) { _, i -> bindWidget(providers[i]) }
+            .setNegativeButton("キャンセル", null).show()
+    }
+
+    private fun bindWidget(info: android.appwidget.AppWidgetProviderInfo) {
+        val id = widgetHost.allocateAppWidgetId()
+        pendingWidgetId = id
+        val awm = android.appwidget.AppWidgetManager.getInstance(this)
+        if (awm.bindAppWidgetIdIfAllowed(id, info.profile, info.provider, null)) configureWidget(id)
+        else {
+            @Suppress("DEPRECATION")
+            startActivityForResult(Intent(android.appwidget.AppWidgetManager.ACTION_APPWIDGET_BIND)
+                .putExtra(android.appwidget.AppWidgetManager.EXTRA_APPWIDGET_ID, id)
+                .putExtra(android.appwidget.AppWidgetManager.EXTRA_APPWIDGET_PROVIDER, info.provider)
+                .putExtra(android.appwidget.AppWidgetManager.EXTRA_APPWIDGET_PROVIDER_PROFILE, info.profile), REQ_BIND)
+        }
+    }
+
+    private fun configureWidget(id: Int) {
+        val info = android.appwidget.AppWidgetManager.getInstance(this).getAppWidgetInfo(id) ?: return
+        if (info.configure != null) {
+            try { widgetHost.startAppWidgetConfigureActivityForResult(this, id, 0, REQ_CONFIG, null); return }
+            catch (e: Exception) { }
+        }
+        finishWidget(id)
+    }
+
+    private fun finishWidget(id: Int) {
+        val old = prefs.getInt("widgetId", -1)
+        if (old != -1 && old != id) widgetHost.deleteAppWidgetId(old)
+        val info = android.appwidget.AppWidgetManager.getInstance(this).getAppWidgetInfo(id) ?: return
+        showWidget(id, info)
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        val id = pendingWidgetId
+        if (id == -1) return
+        if (resultCode != RESULT_OK) { widgetHost.deleteAppWidgetId(id); pendingWidgetId = -1; return }
+        when (requestCode) {
+            REQ_BIND -> configureWidget(id)
+            REQ_CONFIG -> { finishWidget(id); pendingWidgetId = -1 }
+        }
     }
 
     // ---------- media ----------

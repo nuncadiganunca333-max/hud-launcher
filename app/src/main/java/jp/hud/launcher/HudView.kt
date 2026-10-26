@@ -61,6 +61,8 @@ class HudView(context: Context) : View(context), SensorEventListener {
         fun onClockTap()
         fun onHomeSettings()
         fun onTopStripTap()
+        fun onModuleRect(r: RectF)
+        fun onModuleEdit()
     }
 
     var listener: Listener? = null
@@ -72,6 +74,9 @@ class HudView(context: Context) : View(context), SensorEventListener {
         set(v) { field = v; invalidate() }
     var stats = Stats()
         set(v) { field = v; invalidate() }
+    var moduleLinked = false
+        set(v) { field = v; invalidate() }
+    fun moduleBody(): RectF? = panels["MODULE"]?.let { RectF(it.left + unit * 0.35f, it.top + headerH() + unit * 0.25f, it.right - unit * 0.35f, it.bottom - unit * 0.3f) }
     var media: MediaInfo? = null
         set(v) { field = v; invalidate() }
 
@@ -200,10 +205,13 @@ class HudView(context: Context) : View(context), SensorEventListener {
             panels["WEATHER"] = RectF(rx1, top + lh * 0.36f + gap / 2, W - m, top + lh * 0.76f - gap / 2)
             panels["MEDIA"] = RectF(rx1, top + lh * 0.76f + gap / 2, W - m, colBottom)
             panels["NETWORK"] = RectF(m, colBottom + gap, W - m, bottom)
-            statusStrip.set(W * 0.28f, colBottom - unit * 1.9f, W * 0.72f, colBottom)
+            val modTop = colBottom - unit * 8f
+            panels["MODULE"] = RectF(W * 0.28f, modTop, W * 0.72f, colBottom)
+            statusStrip.setEmpty()
             cx = W / 2
-            cy = top + (statusStrip.top - top) * 0.5f
-            coreR = min(W * 0.2f, (statusStrip.top - top) * 0.40f)
+            val avail = modTop - gap - top
+            cy = top + avail * 0.5f
+            coreR = min(W * 0.2f, avail * 0.36f)
         } else {
             cx = W / 2; coreR = W * 0.345f
             cy = top + coreR * 1.2f
@@ -213,10 +221,9 @@ class HudView(context: Context) : View(context), SensorEventListener {
             val r1 = pTop + ph * 0.37f; val r2 = pTop + ph * 0.71f
             panels["SYSTEM"] = RectF(m, pTop, mid - gap / 2, r1 - gap / 2)
             panels["WEATHER"] = RectF(mid + gap / 2, pTop, W - m, r1 - gap / 2)
-            panels["POWER"] = RectF(m, r1 + gap / 2, mid - gap / 2, r2 - gap / 2)
+            panels["MEDIA"] = RectF(m, r1 + gap / 2, mid - gap / 2, r2 - gap / 2)
             panels["CALENDAR"] = RectF(mid + gap / 2, r1 + gap / 2, W - m, r2 - gap / 2)
-            panels["MEDIA"] = RectF(m, r2 + gap / 2, mid - gap / 2, bottom)
-            panels["NETWORK"] = RectF(mid + gap / 2, r2 + gap / 2, W - m, bottom)
+            panels["MODULE"] = RectF(m, r2 + gap / 2, W - m, bottom)
             statusStrip.setEmpty()
         }
         bgLayer?.recycle(); fgLayer?.recycle()
@@ -226,6 +233,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
             drawBackground(c, -bgMargin.toFloat(), -bgMargin.toFloat(), W + bgMargin, H + bgMargin)
         }
         fgLayer = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).also { drawForeground(Canvas(it), W, H) }
+        moduleBody()?.let { listener?.onModuleRect(it) }
         invalidate()
     }
 
@@ -356,6 +364,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
             panels["CALENDAR"]?.let { drawCalendar(c, it, now) }
             panels["WEATHER"]?.let { drawWeather(c, it, t) }
             panels["MEDIA"]?.let { drawMedia(c, it, t) }
+            panels["MODULE"]?.let { drawModule(c, it, t) }
             panels["NETWORK"]?.let { drawNetwork(c, it, t) }
             if (!statusStrip.isEmpty) drawStatus(c, statusStrip, t)
             sheens(c, t)
@@ -910,6 +919,22 @@ class HudView(context: Context) : View(context), SensorEventListener {
         }
     }
 
+    private fun drawModule(c: Canvas, r: RectF, t: Float) {
+        val b = moduleBody() ?: return
+        label.textAlign = Paint.Align.RIGHT; label.textSize = headerH() * 0.42f; label.color = cyan(140); label.letterSpacing = 0.15f
+        c.drawText(if (moduleLinked) "LONG-PRESS HEADER TO EDIT" else "", r.right - headerH() * 1.6f, r.top + headerH() * 0.66f, label)
+        label.letterSpacing = 0f
+        if (moduleLinked) return
+        val fs = min(unit * 0.7f, b.height() / 4f)
+        dash.strokeWidth = 2f; dash.color = cyan(110); c.drawRect(b, dash)
+        label.textAlign = Paint.Align.CENTER; label.textSize = fs * 1.1f; label.letterSpacing = 0.3f
+        label.color = cyan(if ((t * 1.2f).toInt() % 2 == 0) 220 else 120)
+        c.drawText("+  LINK MODULE", b.centerX(), b.centerY() - fs * 0.1f, label)
+        label.textSize = fs * 0.75f; label.letterSpacing = 0.05f; label.color = cyan(150)
+        c.drawText("タップしてウィジェットを追加（テスラなど）", b.centerX(), b.centerY() + fs * 1.3f, label)
+        label.letterSpacing = 0f; label.color = CYAN
+    }
+
     private fun drawFlash(c: Canvas) {
         val r = flashRect ?: return
         val age = System.currentTimeMillis() - flashStart
@@ -980,6 +1005,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
             }
             return
         }
+        panels["MODULE"]?.let { if (it.contains(x, y)) { if (!moduleLinked) listener?.onModuleEdit(); return } }
         if (panels["MEDIA"]?.contains(x, y) == true && media != null) {
             for ((k, r) in mediaBtns) if (r.contains(x, y)) { listener?.onMediaAction(k); return }
             if (mediaArt.contains(x, y)) { listener?.onMediaAction("open"); return }
@@ -991,6 +1017,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
 
     private fun longPress(x: Float, y: Float) {
         segmentAt(x, y)?.app?.let { listener?.onDockLongPress(it); return }
+        panels["MODULE"]?.let { if (it.contains(x, y)) { listener?.onModuleEdit(); return } }
         if (y < topStrip.bottom + unit) listener?.onHomeSettings()
     }
 }
