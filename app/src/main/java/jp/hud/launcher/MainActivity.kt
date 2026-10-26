@@ -281,11 +281,19 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
     private fun placeWidget() {
         val v = widgetView ?: return
         if (moduleRect.isEmpty) return
-        val lp = FrameLayout.LayoutParams(moduleRect.width().toInt(), moduleRect.height().toInt())
+        val d = resources.displayMetrics.density
+        val info = v.appWidgetInfo
+        // ウィジェット本来の高さで描画してから、枠に収まるよう縮小する（詰め込みによる文字の重なり防止）
+        val wantH = maxOf(moduleRect.height(), (info?.minHeight ?: 0).toFloat(), 130 * d)
+        val scale = (moduleRect.height() / wantH).coerceAtMost(1f)
+        val natW = moduleRect.width() / scale
+        val natH = moduleRect.height() / scale
+        val lp = FrameLayout.LayoutParams(natW.toInt(), natH.toInt())
         lp.leftMargin = moduleRect.left.toInt(); lp.topMargin = moduleRect.top.toInt()
         v.layoutParams = lp
-        val d = resources.displayMetrics.density
-        val wdp = (moduleRect.width() / d).toInt(); val hdp = (moduleRect.height() / d).toInt()
+        v.pivotX = 0f; v.pivotY = 0f
+        v.scaleX = scale; v.scaleY = scale
+        val wdp = (natW / d).toInt(); val hdp = (natH / d).toInt()
         if (Build.VERSION.SDK_INT >= 31) {
             v.updateAppWidgetSize(Bundle(), listOf(android.util.SizeF(wdp.toFloat(), hdp.toFloat())))
         } else {
