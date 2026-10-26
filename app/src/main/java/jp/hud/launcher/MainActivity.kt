@@ -15,6 +15,12 @@ import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.os.StatFs
+import android.os.Build
+import android.app.ActivityOptions
+import android.app.AlertDialog
+import android.media.AudioManager
+import android.speech.tts.TextToSpeech
+import java.util.Locale
 import android.os.SystemClock
 import android.net.TrafficStats
 import android.provider.AlarmClock
@@ -37,7 +43,7 @@ data class AppEntry(val label: String, val pkg: String, val cls: String) {
     val key get() = "$pkg/$cls"
 }
 
-class MainActivity : Activity(), HudView.Listener {
+class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener {
 
     private val CYAN = Color.rgb(0, 229, 255)
     private lateinit var hud: HudView
@@ -48,6 +54,10 @@ class MainActivity : Activity(), HudView.Listener {
     private var filtered: List<AppEntry> = emptyList()
     private val handler = Handler(Looper.getMainLooper())
     private var lastWeather = 0L
+    private lateinit var alert: AlertOverlay
+    private val alertQueue = ArrayDeque<NotifItem>()
+    private var tts: TextToSpeech? = null
+    private var ttsReady = false
     private val prefs by lazy { getSharedPreferences("hud", Context.MODE_PRIVATE) }
 
     // 天気の地点（静岡市清水区付近）
@@ -61,8 +71,13 @@ class MainActivity : Activity(), HudView.Listener {
         val root = FrameLayout(this)
         hud = HudView(this).also { it.listener = this }
         root.addView(hud, FrameLayout.LayoutParams(-1, -1))
+        alert = AlertOverlay(this).also { it.listener = this }
+        root.addView(alert, FrameLayout.LayoutParams(-1, -1))
         drawer = buildDrawer()
         root.addView(drawer, FrameLayout.LayoutParams(-1, -1))
+        tts = TextToSpeech(this) { st ->
+            if (st == TextToSpeech.SUCCESS) { tts?.language = Locale.JAPAN; tts?.setSpeechRate(1.05f); ttsReady = true }
+        }
         setContentView(root)
 
         root.setOnApplyWindowInsetsListener { v, ins ->
@@ -78,12 +93,31 @@ class MainActivity : Activity(), HudView.Listener {
         loadApps()
         hud.start()
         handler.post(statsLoop)
+        val enabled = notifAccessEnabled()
+        hud.notifLink = enabled
+        hud.voiceOn = prefs.getBoolean("voice", true)
+        if (!enabled && !prefs.getBoolean("askedNotif", false)) {
+            prefs.edit().putBoolean("askedNotif", true).apply()
+            askNotifAccess()
+        }
+        NotifService.sink = { onNotif(it, live = true) }
+        // ホーム以外にいた間に届いた通知（10分以内）
+        val now = System.currentTimeMillis()
+        NotifService.pending.filter { now - it.time < 10 * 60 * 1000 }.forEach { onNotif(it, live = false) }
+        NotifService.pending.clear()
+    }
+
+    override fun onDestroy() {
+        tts?.shutdown()
+        super.onDestroy()
     }
 
     override fun onPause() {
         super.onPause()
         hud.stop()
         handler.removeCallbacks(statsLoop)
+        NotifService.sink = null
+        tts?.stop()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -93,7 +127,78 @@ class MainActivity : Activity(), HudView.Listener {
 
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
-        if (drawer.visibility == View.VISIBLE) closeDrawer()
+        if (alert.isShowing) alert.listener?.let { onAlertDismiss(alertQueue.firstOrNull() ?: return) }
+        else if (drawer.visibility == View.VISIBLE) closeDrawer()
+    }
+
+    // ---------- notifications (JARVIS-style) ----------
+    private fun notifAccessEnabled() =
+        Settings.Secure.getString(contentResolver, "enabled_notification_listeners")?.contains(packageName) == true
+
+    private fun askNotifAccess() {
+        AlertDialog.Builder(this)
+            .setTitle("通知アラートを有効にしますか？")
+            .setMessage("通知が届いたときにHUDで知らせて、アプリを開くか確認するには「通知へのアクセス」の許可が必要です。\n\n次の画面で「HUD Launcher」をオンにしてください。")
+            .setPositiveButton("設定を開く") { _, _ -> safeStart(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) }
+            .setNegativeButton("あとで", null)
+            .show()
+    }
+
+    private fun onNotif(n: NotifItem, live: Boolean) {
+        alertQueue.removeAll { it.key == n.key }
+        alertQueue.addLast(n)
+        while (alertQueue.size > 6) alertQueue.removeFirst()
+        if (!alert.isShowing) showNext(speak = live)
+        else alert.show(alertQueue.first(), alertQueue.size - 1)
+    }
+
+    private fun showNext(speak: Boolean) {
+        val n = alertQueue.firstOrNull() ?: run { alert.hide(); return }
+        closeDrawer()
+        alert.show(n, alertQueue.size - 1)
+        if (speak) say(n)
+    }
+
+    private fun say(n: NotifItem) {
+        if (!ttsReady || !prefs.getBoolean("voice", true)) return
+        val am = getSystemService(AUDIO_SERVICE) as AudioManager
+        if (am.ringerMode != AudioManager.RINGER_MODE_NORMAL) return
+        val who = if (n.title.isNotEmpty() && n.title.length <= 20) "、${n.title}さんから" else ""
+        tts?.speak("${n.appLabel}${who}の通知です。開きますか？", TextToSpeech.QUEUE_FLUSH, null, n.key)
+    }
+
+    override fun onAlertOpen(item: NotifItem) {
+        tts?.stop()
+        alertQueue.removeAll { it.key == item.key }
+        alert.hide()
+        var ok = false
+        item.intent?.let {
+            try {
+                val opts = if (Build.VERSION.SDK_INT >= 34) ActivityOptions.makeBasic()
+                    .setPendingIntentBackgroundActivityStartMode(ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED).toBundle() else null
+                it.send(this, 0, null, null, null, null, opts); ok = true
+            } catch (e: Exception) { }
+        }
+        if (!ok) packageManager.getLaunchIntentForPackage(item.pkg)?.let { safeStart(it); ok = true }
+        if (!ok) toast("開けませんでした")
+        if (item.autoCancel) try { NotifService.instance?.cancelNotification(item.key) } catch (e: Exception) { }
+        alertQueue.clear()
+    }
+
+    override fun onAlertDismiss(item: NotifItem) {
+        tts?.stop()
+        alertQueue.removeAll { it.key == item.key }
+        showNext(speak = false)
+    }
+
+    override fun onTopStripTap() {
+        if (!notifAccessEnabled()) askNotifAccess()
+        else {
+            val v = !prefs.getBoolean("voice", true)
+            prefs.edit().putBoolean("voice", v).apply()
+            hud.voiceOn = v
+            toast(if (v) "音声読み上げ：ON" else "音声読み上げ：OFF")
+        }
     }
 
     // ---------- apps ----------

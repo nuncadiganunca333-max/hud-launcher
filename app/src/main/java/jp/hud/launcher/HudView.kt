@@ -43,10 +43,15 @@ class HudView(context: Context) : View(context) {
         fun onPanelTap(panel: String)
         fun onClockTap()
         fun onHomeSettings()
+        fun onTopStripTap()
     }
 
     var listener: Listener? = null
     var dock: List<AppEntry> = emptyList()
+        set(v) { field = v; invalidate() }
+    var notifLink = false
+        set(v) { field = v; invalidate() }
+    var voiceOn = true
         set(v) { field = v; invalidate() }
     var stats = Stats()
         set(v) { field = v; invalidate() }
@@ -283,8 +288,10 @@ class HudView(context: Context) : View(context) {
         label.textAlign = Paint.Align.LEFT; label.textSize = unit * 0.75f; label.letterSpacing = 0.2f; label.color = CYAN
         c.drawText("◆ HUD//OS", r.left, base, label)
         val lw = label.measureText("◆ HUD//OS  ")
-        label.textSize = unit * 0.45f; label.color = cyan(150)
-        c.drawText("v2.0  ONLINE", r.left + lw, base, label)
+        label.textSize = unit * 0.45f
+        label.color = if (notifLink) cyan(170) else RED
+        val linkTxt = if (notifLink) "NOTIFY LINK ● ONLINE" + (if (voiceOn) "  VOICE ON" else "  VOICE OFF") else "NOTIFY LINK ○ OFFLINE  (TAP)"
+        c.drawText(linkTxt, r.left + lw, base, label)
         label.letterSpacing = 0f
         mono.textAlign = Paint.Align.RIGHT; mono.textSize = unit * 0.62f; mono.color = CYAN
         val wd = arrayOf("SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT")[now.get(Calendar.DAY_OF_WEEK) - 1]
@@ -625,6 +632,7 @@ class HudView(context: Context) : View(context) {
     }
 
     private fun tap(x: Float, y: Float) {
+        if (y < topStrip.bottom + unit * 0.5f && x < width * 0.5f) { listener?.onTopStripTap(); return }
         segmentAt(x, y)?.let { s ->
             when { s.isApps || s.app == null -> listener?.onOpenDrawer(); else -> listener?.onLaunch(s.app) }
             return
