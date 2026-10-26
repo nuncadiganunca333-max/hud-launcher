@@ -101,6 +101,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener {
             askNotifAccess()
         }
         NotifService.sink = { onNotif(it, live = true) }
+        startMedia()
         // ホーム以外にいた間に届いた通知（10分以内）
         val now = System.currentTimeMillis()
         NotifService.pending.filter { now - it.time < 10 * 60 * 1000 }.forEach { onNotif(it, live = false) }
@@ -114,6 +115,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener {
 
     override fun onPause() {
         super.onPause()
+        stopMedia()
         hud.stop()
         handler.removeCallbacks(statsLoop)
         NotifService.sink = null
@@ -231,12 +233,82 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener {
         saveDock(keys); refreshDock()
     }
 
-    private fun launch(app: AppEntry) {
+    private fun launch(app: AppEntry, src: android.graphics.Rect? = null, delayMs: Long = 0) {
+        val go = Runnable {
+            try {
+                val opts = src?.let {
+                    android.app.ActivityOptions.makeClipRevealAnimation(hud, it.left, it.top, it.width(), it.height()).toBundle()
+                }
+                startActivity(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+                    .setComponent(ComponentName(app.pkg, app.cls))
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED), opts)
+            } catch (e: Exception) { toast("起動できませんでした") }
+        }
+        if (delayMs > 0) handler.postDelayed(go, delayMs) else go.run()
+    }
+
+    // ---------- media ----------
+    private var mediaMgr: android.media.session.MediaSessionManager? = null
+    private var controller: android.media.session.MediaController? = null
+    private val mediaCb = object : android.media.session.MediaController.Callback() {
+        override fun onMetadataChanged(metadata: android.media.MediaMetadata?) = pushMedia()
+        override fun onPlaybackStateChanged(state: android.media.session.PlaybackState?) { pickController(); pushMedia() }
+        override fun onSessionDestroyed() { pickController(); pushMedia() }
+    }
+    private val sessionsListener = android.media.session.MediaSessionManager.OnActiveSessionsChangedListener { pickController(); pushMedia() }
+
+    private fun startMedia() {
+        if (!notifAccessEnabled()) return
         try {
-            startActivity(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
-                .setComponent(ComponentName(app.pkg, app.cls))
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED))
-        } catch (e: Exception) { toast("起動できませんでした") }
+            val mm = getSystemService(MEDIA_SESSION_SERVICE) as android.media.session.MediaSessionManager
+            mediaMgr = mm
+            mm.addOnActiveSessionsChangedListener(sessionsListener, ComponentName(this, NotifService::class.java))
+            pickController(); pushMedia()
+        } catch (e: Exception) { }
+    }
+
+    private fun stopMedia() {
+        try { mediaMgr?.removeOnActiveSessionsChangedListener(sessionsListener) } catch (e: Exception) { }
+        controller?.unregisterCallback(mediaCb); controller = null
+    }
+
+    private fun pickController() {
+        val list = try { mediaMgr?.getActiveSessions(ComponentName(this, NotifService::class.java)) } catch (e: Exception) { null } ?: emptyList()
+        val best = list.firstOrNull { it.playbackState?.state == android.media.session.PlaybackState.STATE_PLAYING } ?: list.firstOrNull()
+        if (best?.sessionToken != controller?.sessionToken) {
+            controller?.unregisterCallback(mediaCb)
+            controller = best
+            best?.registerCallback(mediaCb, handler)
+        }
+    }
+
+    private fun pushMedia() {
+        val c = controller
+        val md = c?.metadata
+        if (c == null || md == null) { hud.media = null; return }
+        val st = c.playbackState
+        val title = md.getString(android.media.MediaMetadata.METADATA_KEY_TITLE) ?: md.getString(android.media.MediaMetadata.METADATA_KEY_DISPLAY_TITLE) ?: ""
+        val artist = md.getString(android.media.MediaMetadata.METADATA_KEY_ARTIST) ?: md.getString(android.media.MediaMetadata.METADATA_KEY_ALBUM) ?: ""
+        val art = md.getBitmap(android.media.MediaMetadata.METADATA_KEY_ALBUM_ART) ?: md.getBitmap(android.media.MediaMetadata.METADATA_KEY_ART)
+            ?: md.getBitmap(android.media.MediaMetadata.METADATA_KEY_DISPLAY_ICON)
+        if (title.isEmpty() && artist.isEmpty()) { hud.media = null; return }
+        hud.media = MediaInfo(title, artist, art,
+            st?.state == android.media.session.PlaybackState.STATE_PLAYING,
+            md.getLong(android.media.MediaMetadata.METADATA_KEY_DURATION),
+            st?.position ?: 0L, st?.lastPositionUpdateTime ?: android.os.SystemClock.elapsedRealtime(), st?.playbackSpeed ?: 1f)
+    }
+
+    override fun onMediaAction(action: String) {
+        val c = controller ?: return
+        val tc = c.transportControls
+        when (action) {
+            "prev" -> tc.skipToPrevious()
+            "next" -> tc.skipToNext()
+            "toggle" -> if (c.playbackState?.state == android.media.session.PlaybackState.STATE_PLAYING) tc.pause() else tc.play()
+            "open" -> try { c.sessionActivity?.send() } catch (e: Exception) {
+                packageManager.getLaunchIntentForPackage(c.packageName)?.let { safeStart(it) }
+            }
+        }
     }
 
     // ---------- drawer ----------
@@ -298,7 +370,10 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener {
                     return tv
                 }
             }
-            setOnItemClickListener { _, _, p, _ -> launch(filtered[p]); closeDrawer() }
+            setOnItemClickListener { _, v, p, _ ->
+                val loc = IntArray(2); v.getLocationInWindow(loc)
+                launch(filtered[p], android.graphics.Rect(loc[0], loc[1], loc[0] + v.width, loc[1] + v.height)); closeDrawer()
+            }
             setOnItemLongClickListener { _, _, p, _ ->
                 toggleDock(filtered[p]); (adapter as BaseAdapter).notifyDataSetChanged(); true
             }
@@ -391,7 +466,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener {
             try {
                 val url = URL("https://api.open-meteo.com/v1/forecast?latitude=$LAT&longitude=$LON" +
                         "&current=temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,wind_speed_10m&wind_speed_unit=ms" +
-                        "&daily=weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset&timezone=Asia%2FTokyo&forecast_days=4")
+                        "&daily=weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset&timezone=Asia%2FTokyo&forecast_days=4&hourly=temperature_2m&forecast_hours=24")
                 val con = url.openConnection() as HttpURLConnection
                 con.connectTimeout = 8000; con.readTimeout = 8000
                 val body = con.inputStream.bufferedReader().readText()
@@ -416,6 +491,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener {
                         sunrise = daily.getJSONArray("sunrise").getString(0).takeLast(5),
                         sunset = daily.getJSONArray("sunset").getString(0).takeLast(5),
                         forecast = lines,
+                        hourly = j.optJSONObject("hourly")?.optJSONArray("temperature_2m")?.let { a -> (0 until a.length()).map { a.getDouble(it).toFloat() } } ?: emptyList(),
                     )
                 }
             } catch (e: Exception) {
@@ -433,7 +509,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener {
 
     // ---------- HUD callbacks ----------
     override fun onOpenDrawer() = openDrawer()
-    override fun onLaunch(app: AppEntry) = launch(app)
+    override fun onLaunch(app: AppEntry, src: android.graphics.Rect?) = launch(app, src, delayMs = 320)
     override fun onDockLongPress(app: AppEntry) = toggleDock(app)
     override fun onClockTap() = safeStart(Intent(AlarmClock.ACTION_SHOW_ALARMS))
     override fun onHomeSettings() = safeStart(Intent(Settings.ACTION_HOME_SETTINGS))

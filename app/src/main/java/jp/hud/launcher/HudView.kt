@@ -2,6 +2,10 @@ package jp.hud.launcher
 
 import android.content.Context
 import android.graphics.*
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.view.GestureDetector
 import android.view.MotionEvent
 import android.view.View
@@ -32,13 +36,26 @@ data class Stats(
     var sunrise: String = "--:--",
     var sunset: String = "--:--",
     var forecast: List<String> = emptyList(),
+    var hourly: List<Float> = emptyList(),
 )
 
-class HudView(context: Context) : View(context) {
+data class MediaInfo(
+    val title: String,
+    val artist: String,
+    val art: Bitmap?,
+    val playing: Boolean,
+    val duration: Long,
+    val position: Long,
+    val updateTime: Long,
+    val speed: Float,
+)
+
+class HudView(context: Context) : View(context), SensorEventListener {
 
     interface Listener {
         fun onOpenDrawer()
-        fun onLaunch(app: AppEntry)
+        fun onLaunch(app: AppEntry, src: Rect?)
+        fun onMediaAction(action: String)
         fun onDockLongPress(app: AppEntry)
         fun onPanelTap(panel: String)
         fun onClockTap()
@@ -55,17 +72,41 @@ class HudView(context: Context) : View(context) {
         set(v) { field = v; invalidate() }
     var stats = Stats()
         set(v) { field = v; invalidate() }
+    var media: MediaInfo? = null
+        set(v) { field = v; invalidate() }
+
+    // launch flash
+    private var flashRect: RectF? = null
+    private var flashLabel = ""
+    private var flashStart = 0L
+
+    fun flashLaunch(src: Rect, name: String) {
+        flashRect = RectF(src); flashLabel = name; flashStart = System.currentTimeMillis(); invalidate()
+    }
 
     private val CYAN = Color.rgb(0, 229, 255)
+    private val BLUE = Color.rgb(120, 200, 255)
     private val RED = Color.rgb(255, 70, 70)
     private val DARK = Color.rgb(1, 10, 20)
     private fun cyan(a: Int) = Color.argb(a.coerceIn(0, 255), 0, 229, 255)
+    private fun withA(col: Int, a: Int) = Color.argb(a.coerceIn(0, 255), Color.red(col), Color.green(col), Color.blue(col))
 
     private var running = false
     private val startTime = System.nanoTime()
-    private var staticLayer: Bitmap? = null
+    private var bootStart = 0L
+    private var bgLayer: Bitmap? = null
+    private var fgLayer: Bitmap? = null
+    private var bgMargin = 0
     private var insetTop = 0f
     private var insetBottom = 0f
+
+    // smoothed display values (count-up effect)
+    private var dBatt = 0f; private var dMem = 0f; private var dSto = 0f; private var dTemp = 0f
+
+    // parallax
+    private val sensors = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
+    private var gx = 0f; private var gy = 0f; private var bx = 0f; private var by = 0f
+    private var px = 0f; private var py = 0f
 
     // ---- layout ----
     private var wide = true
@@ -90,6 +131,9 @@ class HudView(context: Context) : View(context) {
     private val mono = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = CYAN; typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
     }
+    private val monoGlow = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD); maskFilter = BlurMaskFilter(12f, BlurMaskFilter.Blur.NORMAL)
+    }
     private val thin = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = CYAN; typeface = Typeface.create("sans-serif-thin", Typeface.NORMAL); textAlign = Paint.Align.CENTER
     }
@@ -97,6 +141,7 @@ class HudView(context: Context) : View(context) {
         color = cyan(170); typeface = Typeface.create("sans-serif-thin", Typeface.NORMAL)
         textAlign = Paint.Align.CENTER; maskFilter = BlurMaskFilter(14f, BlurMaskFilter.Blur.NORMAL)
     }
+    private val layerPaint = Paint()
 
     private val gestures = GestureDetector(context, object : GestureDetector.SimpleOnGestureListener() {
         override fun onDown(e: MotionEvent) = true
@@ -113,8 +158,23 @@ class HudView(context: Context) : View(context) {
         if (width > 0) relayout(width, height)
     }
 
-    fun start() { if (!running) { running = true; invalidate() } }
-    fun stop() { running = false }
+    fun start() {
+        if (running) return
+        running = true
+        bootStart = System.currentTimeMillis()
+        dBatt = 0f; dMem = 0f; dSto = 0f; dTemp = 0f
+        sensors.getDefaultSensor(Sensor.TYPE_GRAVITY)?.let { sensors.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME) }
+        invalidate()
+    }
+
+    fun stop() { running = false; sensors.unregisterListener(this) }
+
+    override fun onSensorChanged(e: SensorEvent) {
+        gx = e.values[0] / 9.81f; gy = e.values[1] / 9.81f
+        if (bx == 0f && by == 0f) { bx = gx; by = gy }
+        bx += (gx - bx) * 0.015f; by += (gy - by) * 0.015f
+    }
+    override fun onAccuracyChanged(s: Sensor?, a: Int) {}
 
     override fun onSizeChanged(w: Int, h: Int, ow: Int, oh: Int) { relayout(w, h) }
 
@@ -134,120 +194,114 @@ class HudView(context: Context) : View(context) {
             val colBottom = top + (bottom - top) * 0.78f
             val lx2 = W * 0.255f; val rx1 = W * 0.745f
             val lh = colBottom - top
-            panels["SYSTEM"] = RectF(m, top, lx2, top + lh * 0.52f - gap / 2)
-            panels["POWER"] = RectF(m, top + lh * 0.52f + gap / 2, lx2, colBottom)
-            panels["CALENDAR"] = RectF(rx1, top, W - m, top + lh * 0.38f - gap / 2)
-            panels["WEATHER"] = RectF(rx1, top + lh * 0.38f + gap / 2, W - m, top + lh * 0.74f - gap / 2)
-            panels["FORECAST"] = RectF(rx1, top + lh * 0.74f + gap / 2, W - m, colBottom)
+            panels["SYSTEM"] = RectF(m, top, lx2, top + lh * 0.50f - gap / 2)
+            panels["POWER"] = RectF(m, top + lh * 0.50f + gap / 2, lx2, colBottom)
+            panels["CALENDAR"] = RectF(rx1, top, W - m, top + lh * 0.36f - gap / 2)
+            panels["WEATHER"] = RectF(rx1, top + lh * 0.36f + gap / 2, W - m, top + lh * 0.76f - gap / 2)
+            panels["MEDIA"] = RectF(rx1, top + lh * 0.76f + gap / 2, W - m, colBottom)
             panels["NETWORK"] = RectF(m, colBottom + gap, W - m, bottom)
             statusStrip.set(W * 0.28f, colBottom - unit * 1.9f, W * 0.72f, colBottom)
             cx = W / 2
             cy = top + (statusStrip.top - top) * 0.5f
-            coreR = min(W * 0.205f, (statusStrip.top - top) * 0.42f)
+            coreR = min(W * 0.2f, (statusStrip.top - top) * 0.40f)
         } else {
-            cx = W / 2; coreR = W * 0.355f
-            cy = top + coreR * 1.18f
-            val pTop = cy + coreR * 1.22f
+            cx = W / 2; coreR = W * 0.345f
+            cy = top + coreR * 1.2f
+            val pTop = cy + coreR * 1.24f
             val ph = bottom - pTop
             val mid = W / 2
-            val r1 = pTop + ph * 0.36f; val r2 = pTop + ph * 0.70f
+            val r1 = pTop + ph * 0.37f; val r2 = pTop + ph * 0.71f
             panels["SYSTEM"] = RectF(m, pTop, mid - gap / 2, r1 - gap / 2)
             panels["WEATHER"] = RectF(mid + gap / 2, pTop, W - m, r1 - gap / 2)
             panels["POWER"] = RectF(m, r1 + gap / 2, mid - gap / 2, r2 - gap / 2)
             panels["CALENDAR"] = RectF(mid + gap / 2, r1 + gap / 2, W - m, r2 - gap / 2)
-            panels["NETWORK"] = RectF(m, r2 + gap / 2, W - m, bottom)
+            panels["MEDIA"] = RectF(m, r2 + gap / 2, mid - gap / 2, bottom)
+            panels["NETWORK"] = RectF(mid + gap / 2, r2 + gap / 2, W - m, bottom)
             statusStrip.setEmpty()
         }
-        staticLayer?.recycle()
-        staticLayer = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).also { drawStatic(Canvas(it), W, H) }
+        bgLayer?.recycle(); fgLayer?.recycle()
+        bgMargin = (unit * 1.6f).toInt()
+        bgLayer = Bitmap.createBitmap(w + bgMargin * 2, h + bgMargin * 2, Bitmap.Config.ARGB_8888).also {
+            val c = Canvas(it); c.translate(bgMargin.toFloat(), bgMargin.toFloat())
+            drawBackground(c, -bgMargin.toFloat(), -bgMargin.toFloat(), W + bgMargin, H + bgMargin)
+        }
+        fgLayer = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).also { drawForeground(Canvas(it), W, H) }
         invalidate()
     }
 
-    // ======================= STATIC =======================
-    private fun drawStatic(c: Canvas, W: Float, H: Float) {
-        fill.shader = RadialGradient(cx, cy, max(W, H) * 0.8f,
-            intArrayOf(Color.rgb(8, 44, 72), Color.rgb(3, 18, 34), Color.rgb(1, 6, 13)),
+    // ======================= STATIC LAYERS =======================
+    private fun drawBackground(c: Canvas, x0: Float, y0: Float, x1: Float, y1: Float) {
+        fill.shader = RadialGradient(cx, cy, max(x1 - x0, y1 - y0) * 0.8f,
+            intArrayOf(Color.rgb(8, 46, 76), Color.rgb(3, 18, 34), Color.rgb(1, 5, 11)),
             floatArrayOf(0f, 0.5f, 1f), Shader.TileMode.CLAMP)
-        c.drawRect(0f, 0f, W, H, fill); fill.shader = null
+        c.drawRect(x0, y0, x1, y1, fill); fill.shader = null
 
-        // fine + coarse grid
         stroke.strokeWidth = 1f
-        var i = 0; var x = 0f
-        while (x < W) { stroke.color = cyan(if (i % 4 == 0) 22 else 9); c.drawLine(x, 0f, x, H, stroke); x += unit; i++ }
-        i = 0; var y = 0f
-        while (y < H) { stroke.color = cyan(if (i % 4 == 0) 22 else 9); c.drawLine(0f, y, W, y, stroke); y += unit; i++ }
+        var i = 0; var x = x0
+        while (x < x1) { stroke.color = cyan(if (i % 4 == 0) 20 else 8); c.drawLine(x, y0, x, y1, stroke); x += unit; i++ }
+        i = 0; var y = y0
+        while (y < y1) { stroke.color = cyan(if (i % 4 == 0) 20 else 8); c.drawLine(x0, y, x1, y, stroke); y += unit; i++ }
 
         val rnd = Random(11)
+        val w = x1 - x0; val h = y1 - y0
         stroke.strokeWidth = 2f
         repeat(26) {
-            var px = rnd.nextFloat() * W; var py = rnd.nextFloat() * H
-            val p = Path().apply { moveTo(px, py) }
+            var qx = x0 + rnd.nextFloat() * w; var qy = y0 + rnd.nextFloat() * h
+            val p = Path().apply { moveTo(qx, qy) }
             repeat(rnd.nextInt(2, 4)) {
-                if (rnd.nextBoolean()) px += (if (rnd.nextBoolean()) 1 else -1) * rnd.nextInt(60, 260)
-                else { val d = rnd.nextInt(40, 140).toFloat(); px += if (rnd.nextBoolean()) d else -d; py += if (rnd.nextBoolean()) d else -d }
-                p.lineTo(px, py)
+                if (rnd.nextBoolean()) qx += (if (rnd.nextBoolean()) 1 else -1) * rnd.nextInt(60, 260)
+                else { val d = rnd.nextInt(40, 140).toFloat(); qx += if (rnd.nextBoolean()) d else -d; qy += if (rnd.nextBoolean()) d else -d }
+                p.lineTo(qx, qy)
             }
-            stroke.color = cyan(rnd.nextInt(25, 70)); c.drawPath(p, stroke)
-            stroke.color = cyan(140); c.drawCircle(px, py, 4f, stroke)
+            stroke.color = cyan(rnd.nextInt(25, 65)); c.drawPath(p, stroke)
+            stroke.color = cyan(130); c.drawCircle(qx, qy, 4f, stroke)
         }
-        repeat(160) {
+        repeat(180) {
             fill.color = cyan(rnd.nextInt(40, 180))
-            c.drawCircle(rnd.nextFloat() * W, rnd.nextFloat() * H, rnd.nextInt(1, 3).toFloat(), fill)
+            c.drawCircle(x0 + rnd.nextFloat() * w, y0 + rnd.nextFloat() * h, rnd.nextInt(1, 3).toFloat(), fill)
         }
+    }
 
-        // core static decoration
-        ticks(c, coreR * 1.13f, 144, unit * 0.22f, cyan(120))
-        ring(c, coreR * 1.02f, 2f, cyan(120))
-        ring(c, coreR * 1.2f, 1.5f, cyan(60))
-        ticks(c, coreR * 0.70f, 90, unit * 0.15f, cyan(110))
-        // crosshair lines out of core
-        stroke.strokeWidth = 1.5f; stroke.color = cyan(70)
-        c.drawLine(cx - coreR * 1.45f, cy, cx - coreR * 1.24f, cy, stroke)
-        c.drawLine(cx + coreR * 1.24f, cy, cx + coreR * 1.45f, cy, stroke)
-        c.drawLine(cx, cy - coreR * 1.38f, cx, cy - coreR * 1.24f, stroke)
-
+    private fun drawForeground(c: Canvas, W: Float, H: Float) {
         for ((name, r) in panels) panelFrame(c, r, name)
         if (!statusStrip.isEmpty) panelFrame(c, statusStrip, null)
-        // top strip
         stroke.strokeWidth = 2f; stroke.color = cyan(150)
         c.drawLine(topStrip.left, topStrip.bottom, topStrip.right, topStrip.bottom, stroke)
         stroke.strokeWidth = 6f; stroke.color = CYAN
         c.drawLine(topStrip.left, topStrip.bottom, topStrip.left + unit * 3, topStrip.bottom, stroke)
         c.drawLine(topStrip.right - unit * 3, topStrip.bottom, topStrip.right, topStrip.bottom, stroke)
-    }
-
-    private fun ring(c: Canvas, r: Float, w: Float, col: Int) { stroke.strokeWidth = w; stroke.color = col; c.drawCircle(cx, cy, r, stroke) }
-
-    private fun ticks(c: Canvas, r: Float, n: Int, len: Float, col: Int) {
-        stroke.color = col; stroke.strokeWidth = 2f
-        for (k in 0 until n) {
-            val t = 2 * PI * k / n; val l = if (k % 6 == 0) len * 2 else len
-            c.drawLine(cx + r * cos(t).toFloat(), cy + r * sin(t).toFloat(),
-                cx + (r - l) * cos(t).toFloat(), cy + (r - l) * sin(t).toFloat(), stroke)
-        }
+        // hologram scanlines over everything
+        fill.color = Color.argb(14, 0, 0, 0)
+        var y = 0f
+        while (y < H) { c.drawRect(0f, y, W, y + 2f, fill); y += 5f }
+        // vignette
+        fill.shader = RadialGradient(W / 2, H / 2, max(W, H) * 0.75f, intArrayOf(Color.TRANSPARENT, Color.TRANSPARENT, Color.argb(120, 0, 0, 0)),
+            floatArrayOf(0f, 0.65f, 1f), Shader.TileMode.CLAMP)
+        c.drawRect(0f, 0f, W, H, fill); fill.shader = null
     }
 
     private fun headerH() = unit * 1.05f
 
     private fun panelFrame(c: Canvas, r: RectF, title: String?) {
-        fill.color = Color.argb(95, 0, 28, 48); c.drawRect(r, fill)
-        stroke.strokeWidth = 2f; stroke.color = cyan(130); c.drawRect(r, stroke)
+        fill.shader = LinearGradient(0f, r.top, 0f, r.bottom, Color.argb(200, 3, 30, 50), Color.argb(215, 1, 14, 26), Shader.TileMode.CLAMP)
+        c.drawRect(r, fill); fill.shader = null
+        stroke.strokeWidth = 2f; stroke.color = cyan(120); c.drawRect(r, stroke)
+        stroke.strokeWidth = 1f; stroke.color = cyan(40)
+        c.drawRect(r.left + 5, r.top + 5, r.right - 5, r.bottom - 5, stroke)
         if (title != null) {
             val hh = headerH()
-            fill.color = cyan(38); c.drawRect(r.left, r.top, r.right, r.top + hh, fill)
+            fill.color = cyan(34); c.drawRect(r.left, r.top, r.right, r.top + hh, fill)
             stroke.strokeWidth = 1.5f; stroke.color = cyan(150)
             c.drawLine(r.left, r.top + hh, r.right, r.top + hh, stroke)
             label.textAlign = Paint.Align.LEFT; label.textSize = hh * 0.55f; label.letterSpacing = 0.18f; label.color = CYAN
             c.drawText(title, r.left + hh * 0.45f, r.top + hh * 0.7f, label)
             label.letterSpacing = 0f
-            fill.color = CYAN
             for (k in 0 until 3) {
                 val s = hh * 0.22f; val x = r.right - hh * 0.4f - k * s * 1.8f
                 fill.color = cyan(if (k == 0) 255 else 120)
                 c.drawRect(x - s, r.top + hh / 2 - s / 2, x, r.top + hh / 2 + s / 2, fill)
             }
         }
-        // corner accents
         stroke.strokeWidth = 5f; stroke.color = CYAN
         val a = unit * 1.2f
         c.drawLine(r.left, r.top, r.left + a, r.top, stroke); c.drawLine(r.left, r.top, r.left, r.top + a * 0.6f, stroke)
@@ -255,26 +309,84 @@ class HudView(context: Context) : View(context) {
     }
 
     // ======================= FRAME =======================
+    private fun ease(p: Float) = 1f - (1f - p.coerceIn(0f, 1f)).pow(3)
+
     override fun onDraw(c: Canvas) {
-        staticLayer?.let { c.drawBitmap(it, 0f, 0f, null) } ?: return
+        val bg = bgLayer ?: return; val fg = fgLayer ?: return
         val t = (System.nanoTime() - startTime) / 1e9f
         val now = Calendar.getInstance()
+        val boot = ((System.currentTimeMillis() - bootStart) / 1300f).coerceIn(0f, 1f)
+        val eb = ease(boot)
 
-        drawTopStrip(c, t, now)
+        // smoothing
+        val s = stats
+        dBatt += (s.battery - dBatt) * 0.08f; dMem += (s.memory - dMem) * 0.08f; dSto += (s.storage - dSto) * 0.08f
+        dTemp += ((s.temp ?: 0f) - dTemp) * 0.08f
+        // parallax
+        val tx = ((gx - bx) * unit * 9f).coerceIn(-unit * 1.4f, unit * 1.4f)
+        val ty = ((gy - by) * unit * 9f).coerceIn(-unit * 1.4f, unit * 1.4f)
+        px += (tx - px) * 0.15f; py += (ty - py) * 0.15f
+
+        // background (moves opposite)
+        layerPaint.alpha = (255 * min(1f, boot * 2.5f)).toInt()
+        c.drawBitmap(bg, -bgMargin - px * 0.7f, -bgMargin - py * 0.7f, layerPaint)
+
+        // core (moves with tilt, boots by spinning in)
+        c.save()
+        c.translate(px * 0.5f, py * 0.5f)
+        if (boot < 1f) {
+            c.saveLayerAlpha(null, (255 * eb).toInt())
+            c.scale(0.55f + 0.45f * eb, 0.55f + 0.45f * eb, cx, cy)
+            c.rotate((1f - eb) * -140f, cx, cy)
+        }
         drawCore(c, t, now)
-        panels["SYSTEM"]?.let { drawSystem(c, it) }
-        panels["POWER"]?.let { drawPower(c, it) }
-        panels["CALENDAR"]?.let { drawCalendar(c, it, now) }
-        panels["WEATHER"]?.let { drawWeather(c, it) }
-        panels["FORECAST"]?.let { drawForecast(c, it) }
-        panels["NETWORK"]?.let { drawNetwork(c, it, t) }
-        if (!statusStrip.isEmpty) drawStatus(c, statusStrip, t)
+        if (boot < 1f) c.restore()
+        c.restore()
 
+        // panels: reveal from center
+        val pb = ease((boot - 0.25f) / 0.75f)
+        if (pb > 0f) {
+            c.save()
+            val half = width / 2f * pb
+            c.clipRect(width / 2f - half, 0f, width / 2f + half, height.toFloat())
+            c.drawBitmap(fg, 0f, 0f, null)
+            drawTopStrip(c, t, now)
+            panels["SYSTEM"]?.let { drawSystem(c, it, t) }
+            panels["POWER"]?.let { drawPower(c, it, t) }
+            panels["CALENDAR"]?.let { drawCalendar(c, it, now) }
+            panels["WEATHER"]?.let { drawWeather(c, it, t) }
+            panels["MEDIA"]?.let { drawMedia(c, it, t) }
+            panels["NETWORK"]?.let { drawNetwork(c, it, t) }
+            if (!statusStrip.isEmpty) drawStatus(c, statusStrip, t)
+            sheens(c, t)
+            if (pb < 1f) {
+                stroke.strokeWidth = 3f; stroke.color = CYAN
+                c.drawLine(width / 2f - half, 0f, width / 2f - half, height.toFloat(), stroke)
+                c.drawLine(width / 2f + half, 0f, width / 2f + half, height.toFloat(), stroke)
+            }
+            c.restore()
+        }
+
+        drawFlash(c)
         val sy = ((t * 0.1f) % 1f) * height
-        stroke.strokeWidth = 2f; stroke.color = cyan(26)
-        c.drawLine(0f, sy, width.toFloat(), sy, stroke)
+        fill.shader = LinearGradient(0f, sy - unit * 2, 0f, sy, Color.TRANSPARENT, cyan(22), Shader.TileMode.CLAMP)
+        c.drawRect(0f, sy - unit * 2, width.toFloat(), sy, fill); fill.shader = null
 
-        if (running) postInvalidateDelayed(33)
+        if (running) { if (boot < 1f) postInvalidateOnAnimation() else postInvalidateDelayed(33) }
+    }
+
+    private fun sheens(c: Canvas, t: Float) {
+        var k = 0
+        for ((_, r) in panels) {
+            val ph = ((t * 0.18f + k * 0.29f) % 1.8f) - 0.4f
+            k++
+            if (ph < -0.2f || ph > 1.2f) continue
+            val x = r.left + ph * r.width(); val w = unit * 4
+            c.save(); c.clipRect(r.left, r.top, r.right, r.top + headerH())
+            fill.shader = LinearGradient(x - w, 0f, x + w, 0f, intArrayOf(Color.TRANSPARENT, cyan(70), Color.TRANSPARENT), null, Shader.TileMode.CLAMP)
+            c.drawRect(x - w, r.top, x + w, r.top + headerH(), fill); fill.shader = null
+            c.restore()
+        }
     }
 
     private fun hexStream(seed: Long, len: Int): String {
@@ -292,15 +404,19 @@ class HudView(context: Context) : View(context) {
         label.color = if (notifLink) cyan(170) else RED
         val linkTxt = if (notifLink) "NOTIFY LINK ● ONLINE" + (if (voiceOn) "  VOICE ON" else "  VOICE OFF") else "NOTIFY LINK ○ OFFLINE  (TAP)"
         c.drawText(linkTxt, r.left + lw, base, label)
+        val linkW = label.measureText(linkTxt)
         label.letterSpacing = 0f
         mono.textAlign = Paint.Align.RIGHT; mono.textSize = unit * 0.62f; mono.color = CYAN
         val wd = arrayOf("SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT")[now.get(Calendar.DAY_OF_WEEK) - 1]
-        val s = String.format(Locale.US, "%04d.%02d.%02d %s %02d:%02d:%02d", now.get(Calendar.YEAR), now.get(Calendar.MONTH) + 1,
+        val st = String.format(Locale.US, "%04d.%02d.%02d %s %02d:%02d:%02d", now.get(Calendar.YEAR), now.get(Calendar.MONTH) + 1,
             now.get(Calendar.DAY_OF_MONTH), wd, now.get(Calendar.HOUR_OF_DAY), now.get(Calendar.MINUTE), now.get(Calendar.SECOND))
-        c.drawText(s, r.right, base, mono)
+        c.drawText(st, r.right, base, mono)
         if (wide) {
-            mono.textAlign = Paint.Align.CENTER; mono.textSize = unit * 0.42f; mono.color = cyan(110)
-            c.drawText(hexStream((t * 6).toLong(), 30), r.centerX(), base, mono)
+            val free = (r.right - mono.measureText(st)) - (r.left + lw + linkW) - unit * 2
+            mono.textAlign = Paint.Align.LEFT; mono.textSize = unit * 0.42f; mono.color = cyan(100)
+            var hs = hexStream((t * 6).toLong(), 40)
+            while (mono.measureText(hs) > free && hs.length > 4) hs = hs.dropLast(5)
+            if (free > unit * 3) c.drawText(hs, r.left + lw + linkW + unit, base, mono)
         }
         mono.color = CYAN
     }
@@ -319,24 +435,68 @@ class HudView(context: Context) : View(context) {
     private val segR1 get() = coreR * 0.78f
     private val segR2 get() = coreR
 
+    private fun ticks(c: Canvas, r: Float, n: Int, len: Float, col: Int) {
+        stroke.color = col; stroke.strokeWidth = 2f
+        for (k in 0 until n) {
+            val a = 2 * PI * k / n; val l = if (k % 6 == 0) len * 2 else len
+            val ca = cos(a).toFloat(); val sa = sin(a).toFloat()
+            c.drawLine(cx + r * ca, cy + r * sa, cx + (r - l) * ca, cy + (r - l) * sa, stroke)
+        }
+    }
+
     private fun drawCore(c: Canvas, t: Float, now: Calendar) {
+        // static-ish decoration
+        ticks(c, coreR * 1.13f, 144, unit * 0.22f, cyan(120))
+        stroke.strokeWidth = 2f; stroke.color = cyan(120); c.drawCircle(cx, cy, coreR * 1.02f, stroke)
+        stroke.strokeWidth = 1.5f; stroke.color = cyan(60); c.drawCircle(cx, cy, coreR * 1.24f, stroke)
+        ticks(c, coreR * 0.70f, 90, unit * 0.15f, cyan(110))
+        stroke.strokeWidth = 1.5f; stroke.color = cyan(70)
+        c.drawLine(cx - coreR * 1.5f, cy, cx - coreR * 1.27f, cy, stroke)
+        c.drawLine(cx + coreR * 1.27f, cy, cx + coreR * 1.5f, cy, stroke)
+
+        // rotating text ring
+        c.save(); c.rotate(-t * 4f, cx, cy)
+        val tr = coreR * 1.185f
+        val ring = Path().apply { addCircle(cx, cy, tr, Path.Direction.CW) }
+        mono.textAlign = Paint.Align.LEFT; mono.textSize = unit * 0.3f; mono.color = cyan(120); mono.letterSpacing = 0.3f
+        val seg = "HUD//OS  ◆  CORE ONLINE  ◆  SYS ${String.format(Locale.US, "%03d", dMem.toInt())}  ◆  PWR ${dBatt.toInt()}  ◆  "
+        val circ = (2 * PI * tr).toFloat()
+        var off = 0f; val segW = mono.measureText(seg)
+        while (off + segW < circ) { c.drawTextOnPath(seg, ring, off, mono.textSize * 0.35f, mono); off += segW }
+        mono.letterSpacing = 0f; mono.color = CYAN
+        c.restore()
+
+        // radar sweep
+        c.save(); c.rotate(t * 70f, cx, cy)
+        stroke.shader = SweepGradient(cx, cy, intArrayOf(Color.TRANSPARENT, Color.TRANSPARENT, cyan(110)), floatArrayOf(0f, 0.75f, 1f))
+        stroke.strokeWidth = coreR * 0.12f
+        c.drawCircle(cx, cy, coreR * 0.715f, stroke); stroke.shader = null
+        stroke.strokeWidth = 3f; stroke.color = cyan(200)
+        c.drawLine(cx + coreR * 0.655f, cy, cx + coreR * 0.775f, cy, stroke)
+        c.restore()
+
+        // segments
         val segs = segments()
         val n = segs.size; val sw = 360f / n; val start = -90f - sw / 2
         val r1 = segR1; val r2 = segR2
         val outer = RectF(cx - r2, cy - r2, cx + r2, cy + r2)
         val inner = RectF(cx - r1, cy - r1, cx + r1, cy + r1)
         val mid = (r1 + r2) / 2; val midRect = RectF(cx - mid, cy - mid, cx + mid, cy + mid)
-        val highlight = ((t * 0.6f) % n).toInt()
-        for ((i, s) in segs.withIndex()) {
+        val hl = (t * 0.5f) % n
+        for ((i, sg) in segs.withIndex()) {
             val a0 = start + i * sw + 1.2f; val sweep = sw - 2.4f
             val p = Path()
             p.arcTo(outer, a0, sweep, true); p.arcTo(inner, a0 + sweep, -sweep); p.close()
-            fill.color = when { s.isApps -> cyan(85); s.app != null -> cyan(if (i == highlight) 60 else 32); else -> cyan(12) }
-            c.drawPath(p, fill)
-            stroke.strokeWidth = 2f; stroke.color = cyan(if (s.app != null || s.isApps) 190 else 70); c.drawPath(p, stroke)
-            val text = when { s.isApps -> "APPS"; s.app != null -> s.app.label.uppercase(); else -> "- - -" }
-            label.textSize = (r2 - r1) * 0.30f; label.textAlign = Paint.Align.LEFT; label.letterSpacing = 0.08f
-            label.color = if (s.isApps || s.app != null) CYAN else cyan(90)
+            val near = 1f - min(1f, abs(hl - i).let { min(it, n - it) })
+            val active = sg.app != null || sg.isApps
+            fill.shader = RadialGradient(cx, cy, r2, intArrayOf(cyan(0), cyan(if (sg.isApps) 70 else if (active) 35 else 10), cyan(if (sg.isApps) 120 else if (active) (55 + 60 * near).toInt() else 18)),
+                floatArrayOf(0f, r1 / r2, 1f), Shader.TileMode.CLAMP)
+            c.drawPath(p, fill); fill.shader = null
+            if (active) { glow.strokeWidth = 6f; glow.color = cyan((60 + 80 * near).toInt()); c.drawPath(p, glow) }
+            stroke.strokeWidth = 2f; stroke.color = cyan(if (active) 200 else 70); c.drawPath(p, stroke)
+            val text = when { sg.isApps -> "APPS"; sg.app != null -> sg.app.label.uppercase(); else -> "+" }
+            label.textSize = (r2 - r1) * (if (active) 0.30f else 0.4f); label.textAlign = Paint.Align.LEFT; label.letterSpacing = 0.08f
+            label.color = if (active) CYAN else cyan(70)
             val center = (a0 + sweep / 2 + 360f) % 360f
             val bottomHalf = center in 0f..180f
             val arcLen = (Math.toRadians(sweep.toDouble()) * mid).toFloat()
@@ -345,42 +505,48 @@ class HudView(context: Context) : View(context) {
             if (shown != text) shown = shown.dropLast(1) + "…"
             val tp = Path()
             if (bottomHalf) tp.addArc(midRect, a0 + sweep, -sweep) else tp.addArc(midRect, a0, sweep)
-            val h = (arcLen - label.measureText(shown)) / 2
-            c.drawTextOnPath(shown, tp, h, label.textSize * 0.36f, label)
+            c.drawTextOnPath(shown, tp, (arcLen - label.measureText(shown)) / 2, label.textSize * 0.36f, label)
             label.letterSpacing = 0f
         }
 
         // rotating outer accents
-        arcAt(c, coreR * 1.08f, 4f, t * 14f, 300f, cyan(60), false)
+        arcAt(c, coreR * 1.08f, 4f, t * 14f, 300f, cyan(55), false)
         for (k in 0 until 4) arcAt(c, coreR * 1.08f, 7f, t * 14f + k * 90f, 28f, CYAN, true)
-        arcAt(c, coreR * 1.27f, 6f, 210f + sin(t * 0.6f) * 25f, 30f, RED, true)
-        for (k in 0 until 10) arcAt(c, coreR * 1.31f, 3f, k * 36f - t * 5f, 14f, cyan(150), false)
+        arcAt(c, coreR * 1.29f, 6f, 210f + sin(t * 0.6f) * 25f, 30f, RED, true)
+        for (k in 0 until 10) arcAt(c, coreR * 1.33f, 3f, k * 36f - t * 5f, 14f, cyan(150), false)
 
-        // dashed rotating ring
+        // dashed ring
         c.save(); c.rotate(-t * 22f, cx, cy)
         dash.strokeWidth = 4f; dash.color = cyan(170); c.drawCircle(cx, cy, coreR * 0.64f, dash)
         c.restore()
-        // seconds sweep
         val sec = now.get(Calendar.SECOND) + now.get(Calendar.MILLISECOND) / 1000f
         arcAt(c, coreR * 0.585f, 6f, -90f, sec / 60f * 360f, CYAN, true)
+        val ha = Math.toRadians((-90f + sec / 60f * 360f).toDouble())
+        fill.color = Color.WHITE
+        c.drawCircle(cx + coreR * 0.585f * cos(ha).toFloat(), cy + coreR * 0.585f * sin(ha).toFloat(), unit * 0.14f, fill)
 
-        // orbit dots
         for (k in 0 until 3) {
             val a = t * (0.9f + k * 0.35f) + k * 2.1f
             fill.color = CYAN
-            c.drawCircle(cx + cos(a) * coreR * 0.72f, cy + sin(a) * coreR * 0.72f, unit * 0.13f, fill)
+            c.drawCircle(cx + cos(a) * coreR * 0.72f, cy + sin(a) * coreR * 0.72f, unit * 0.12f, fill)
         }
 
-        // hexagon core
+        // layered hexagon core
         val hr = coreR * 0.5f
-        fill.shader = RadialGradient(cx, cy, hr, intArrayOf(cyan(70), cyan(18), cyan(0)), floatArrayOf(0f, 0.7f, 1f), Shader.TileMode.CLAMP)
+        fill.shader = RadialGradient(cx, cy, hr, intArrayOf(cyan(80), cyan(20), cyan(0)), floatArrayOf(0f, 0.7f, 1f), Shader.TileMode.CLAMP)
         c.drawPath(hexPath(hr, t * 6f), fill); fill.shader = null
         val pulse = (sin(t * 2.2f) + 1) / 2
-        glow.strokeWidth = 14f; glow.color = cyan((90 + 90 * pulse).toInt()); c.drawPath(hexPath(hr, t * 6f), glow)
+        glow.strokeWidth = 16f; glow.color = cyan((90 + 100 * pulse).toInt()); c.drawPath(hexPath(hr, t * 6f), glow)
         stroke.strokeWidth = 4f; stroke.color = CYAN; c.drawPath(hexPath(hr, t * 6f), stroke)
-        stroke.strokeWidth = 1.5f; stroke.color = cyan(120); c.drawPath(hexPath(hr * 0.86f, -t * 10f), stroke)
+        stroke.strokeWidth = 1.5f; stroke.color = cyan(130); c.drawPath(hexPath(hr * 0.88f, -t * 10f), stroke)
+        stroke.strokeWidth = 1f; stroke.color = cyan(70); c.drawPath(hexPath(hr * 0.76f, t * 15f), stroke)
+        // hex vertices nodes
+        for (k in 0 until 6) {
+            val a = Math.toRadians((t * 6f + 30 + k * 60).toDouble())
+            fill.color = cyan(230)
+            c.drawCircle(cx + hr * cos(a).toFloat(), cy + hr * sin(a).toFloat(), unit * 0.1f, fill)
+        }
 
-        // clock text
         val hm = String.format(Locale.US, "%02d:%02d", now.get(Calendar.HOUR_OF_DAY), now.get(Calendar.MINUTE))
         val big = coreR * 0.27f
         thin.textSize = big; textGlow.textSize = big
@@ -406,42 +572,61 @@ class HudView(context: Context) : View(context) {
 
     private fun arcAt(c: Canvas, r: Float, w: Float, start: Float, sweep: Float, col: Int, withGlow: Boolean) {
         val o = RectF(cx - r, cy - r, cx + r, cy + r)
-        if (withGlow) { glow.strokeWidth = w * 1.8f; glow.color = Color.argb(150, Color.red(col), Color.green(col), Color.blue(col)); c.drawArc(o, start, sweep, false, glow) }
+        if (withGlow) { glow.strokeWidth = w * 1.8f; glow.color = withA(col, 150); c.drawArc(o, start, sweep, false, glow) }
         stroke.strokeWidth = w; stroke.color = col; c.drawArc(o, start, sweep, false, stroke)
     }
 
-    // ---------- panels ----------
+    // ---------- panel helpers ----------
     private fun body(r: RectF) = RectF(r.left + unit * 0.5f, r.top + headerH() + unit * 0.4f, r.right - unit * 0.5f, r.bottom - unit * 0.4f)
 
-    private fun blockBar(c: Canvas, x: Float, y: Float, w: Float, h: Float, v: Int, warn: Boolean) {
+    private fun blockBar(c: Canvas, x: Float, y: Float, w: Float, h: Float, v: Float, warn: Boolean) {
         val n = 20; val gap = w * 0.008f; val bw = (w - gap * (n - 1)) / n
-        val on = (v.coerceIn(0, 100) * n / 100f).roundToInt()
+        val on = v.coerceIn(0f, 100f) * n / 100f
+        val col = if (warn) RED else CYAN
         for (k in 0 until n) {
-            fill.color = if (k < on) (if (warn) RED else CYAN) else cyan(30)
-            c.drawRect(x + k * (bw + gap), y, x + k * (bw + gap) + bw, y + h, fill)
+            val f = (on - k).coerceIn(0f, 1f)
+            fill.color = cyan(26); c.drawRect(x + k * (bw + gap), y, x + k * (bw + gap) + bw, y + h, fill)
+            if (f > 0f) {
+                fill.shader = LinearGradient(0f, y, 0f, y + h, withA(col, 255), withA(col, 150), Shader.TileMode.CLAMP)
+                c.drawRect(x + k * (bw + gap), y + h * (1 - f), x + k * (bw + gap) + bw, y + h, fill); fill.shader = null
+            }
         }
+        glow.strokeWidth = 4f; glow.color = withA(col, 70)
+        c.drawLine(x, y + h / 2, x + w * v.coerceIn(0f, 100f) / 100f, y + h / 2, glow)
     }
 
-    private fun graph(c: Canvas, r: RectF, data: List<Float>, maxV: Float, col: Int, gridLines: Boolean = true) {
-        if (gridLines) {
-            stroke.strokeWidth = 1f; stroke.color = cyan(30)
+    /** autoscale graph with glow line and live endpoint */
+    private fun graph(c: Canvas, r: RectF, data: List<Float>, col: Int, t: Float, fixedMax: Float? = null, grid: Boolean = true) {
+        if (grid) {
+            stroke.strokeWidth = 1f; stroke.color = cyan(28)
             for (k in 1..3) { val y = r.top + r.height() * k / 4; c.drawLine(r.left, y, r.right, y, stroke) }
             for (k in 1..7) { val x = r.left + r.width() * k / 8; c.drawLine(x, r.top, x, r.bottom, stroke) }
+            stroke.strokeWidth = 1.5f; stroke.color = cyan(80); c.drawRect(r, stroke)
         }
-        stroke.strokeWidth = 1.5f; stroke.color = cyan(80); c.drawRect(r, stroke)
         if (data.size < 2) return
-        val mx = max(maxV, 1e-3f)
+        val lo: Float; val hi: Float
+        if (fixedMax != null) { lo = 0f; hi = max(fixedMax, 1e-3f) }
+        else {
+            val mn = data.min(); val mx = data.max()
+            val span = max(mx - mn, 4f)
+            lo = (mn + mx) / 2 - span * 0.7f; hi = (mn + mx) / 2 + span * 0.7f
+        }
         val line = Path(); val area = Path()
         val step = r.width() / (data.size - 1)
+        var lx = 0f; var ly = 0f
         data.forEachIndexed { i, v ->
-            val x = r.left + i * step; val y = r.bottom - (v / mx).coerceIn(0f, 1f) * r.height() * 0.92f
+            val x = r.left + i * step; val y = r.bottom - ((v - lo) / (hi - lo)).coerceIn(0f, 1f) * r.height() * 0.9f - r.height() * 0.04f
             if (i == 0) { line.moveTo(x, y); area.moveTo(x, r.bottom); area.lineTo(x, y) } else { line.lineTo(x, y); area.lineTo(x, y) }
+            lx = x; ly = y
         }
         area.lineTo(r.right, r.bottom); area.close()
-        fill.shader = LinearGradient(0f, r.top, 0f, r.bottom,
-            Color.argb(120, Color.red(col), Color.green(col), Color.blue(col)), Color.argb(5, Color.red(col), Color.green(col), Color.blue(col)), Shader.TileMode.CLAMP)
+        fill.shader = LinearGradient(0f, r.top, 0f, r.bottom, withA(col, 110), withA(col, 0), Shader.TileMode.CLAMP)
         c.drawPath(area, fill); fill.shader = null
+        glow.strokeWidth = 8f; glow.color = withA(col, 130); c.drawPath(line, glow)
         stroke.strokeWidth = 3f; stroke.color = col; c.drawPath(line, stroke)
+        val pr = unit * 0.14f * (1.6f + sin(t * 4f) * 0.6f)
+        stroke.strokeWidth = 2f; stroke.color = withA(col, 160); c.drawCircle(lx, ly, pr * 2, stroke)
+        fill.color = Color.WHITE; c.drawCircle(lx, ly, unit * 0.12f, fill)
     }
 
     private fun kv(c: Canvas, x1: Float, x2: Float, y: Float, k: String, v: String, size: Float, vcol: Int = CYAN) {
@@ -451,38 +636,51 @@ class HudView(context: Context) : View(context) {
         c.drawText(v, x2, y, mono); mono.color = CYAN; label.color = CYAN
     }
 
-    private fun drawSystem(c: Canvas, r: RectF) {
+    private fun bigNum(c: Canvas, text: String, x: Float, y: Float, size: Float, col: Int): Float {
+        mono.textAlign = Paint.Align.LEFT; mono.textSize = size; mono.color = col
+        monoGlow.textAlign = Paint.Align.LEFT; monoGlow.textSize = size; monoGlow.color = withA(col, 160)
+        c.drawText(text, x, y, monoGlow); c.drawText(text, x, y, mono)
+        mono.color = CYAN
+        return mono.measureText(text)
+    }
+
+    private fun caption(c: Canvas, r: RectF, text: String, fs: Float) {
+        label.textAlign = Paint.Align.LEFT; label.textSize = fs; label.color = cyan(150); label.letterSpacing = 0.12f
+        c.drawText(text, r.left + fs * 0.4f, r.top + fs * 1.2f, label); label.letterSpacing = 0f; label.color = CYAN
+    }
+
+    // ---------- panels ----------
+    private fun drawSystem(c: Canvas, r: RectF, t: Float) {
         val b = body(r); val s = stats
         val fs = min(unit * 0.62f, b.height() / 11f)
-        val rows = listOf(Triple("MEMORY", s.memory, s.memory > 90), Triple("STORAGE", s.storage, s.storage > 90),
-            Triple("BATTERY", s.battery, s.battery <= 20 && !s.charging))
+        val rows = listOf(Triple("MEMORY", dMem, s.memory > 90), Triple("STORAGE", dSto, s.storage > 90),
+            Triple("BATTERY", dBatt, s.battery <= 20 && !s.charging))
         var y = b.top + fs
         for ((k, v, warn) in rows) {
-            kv(c, b.left, b.right, y, k, "$v%", fs, if (warn) RED else CYAN)
+            kv(c, b.left, b.right, y, k, "${v.roundToInt()}%", fs, if (warn) RED else CYAN)
             blockBar(c, b.left, y + fs * 0.4f, b.width(), fs * 0.75f, v, warn)
             y += fs * 2.6f
         }
         val g = RectF(b.left, y - fs * 0.2f, b.right, b.bottom)
         if (g.height() > fs * 2) {
-            label.textAlign = Paint.Align.LEFT; label.textSize = fs * 0.7f; label.color = cyan(140)
-            c.drawText("MEMORY LOAD / 2 MIN", g.left + fs * 0.3f, g.top + fs * 0.9f, label); label.color = CYAN
-            graph(c, g, s.memHist, 100f, CYAN)
+            graph(c, g, s.memHist, CYAN, t)
+            caption(c, g, "MEMORY LOAD / 2 MIN", fs * 0.7f)
         }
     }
 
-    private fun drawPower(c: Canvas, r: RectF) {
+    private fun drawPower(c: Canvas, r: RectF, t: Float) {
         val b = body(r); val s = stats
         val fs = min(unit * 0.62f, b.height() / 10f)
         val bigS = fs * 3.2f
         val col = if (s.battery <= 20 && !s.charging) RED else CYAN
-        mono.textAlign = Paint.Align.LEFT; mono.textSize = bigS; mono.color = col
-        c.drawText("${s.battery}", b.left, b.top + bigS * 0.85f, mono)
-        val w = mono.measureText("${s.battery}")
-        mono.textSize = fs * 1.2f; c.drawText("%", b.left + w + fs * 0.2f, b.top + bigS * 0.85f, mono)
+        val w = bigNum(c, "${dBatt.roundToInt()}", b.left, b.top + bigS * 0.85f, bigS, col)
+        mono.textAlign = Paint.Align.LEFT; mono.textSize = fs * 1.2f; mono.color = col
+        c.drawText("%", b.left + w + fs * 0.2f, b.top + bigS * 0.85f, mono); mono.color = CYAN
         label.textAlign = Paint.Align.RIGHT; label.textSize = fs * 0.8f; label.letterSpacing = 0.15f
-        label.color = if (s.charging) CYAN else cyan(160)
+        val blink = (t * 2).toInt() % 2 == 0
+        label.color = if (s.charging) (if (blink) CYAN else cyan(120)) else cyan(160)
         c.drawText(if (s.charging) "⚡ CHARGING" else "DISCHARGING", b.right, b.top + fs, label)
-        label.letterSpacing = 0f; label.color = CYAN; mono.color = CYAN
+        label.letterSpacing = 0f; label.color = CYAN
         var y = b.top + bigS * 0.85f + fs * 1.6f
         kv(c, b.left, b.right, y, "TEMP", String.format(Locale.US, "%.1f°C", s.battTemp), fs, if (s.battTemp >= 42) RED else CYAN); y += fs * 1.5f
         kv(c, b.left, b.right, y, "VOLTAGE", String.format(Locale.US, "%.2fV", s.voltage / 1000f), fs); y += fs * 1.5f
@@ -490,9 +688,8 @@ class HudView(context: Context) : View(context) {
         kv(c, b.left, b.right, y, "UPTIME", String.format(Locale.US, "%dd %02d:%02d", up / 86400, up / 3600 % 24, up / 60 % 60), fs); y += fs * 0.8f
         val g = RectF(b.left, y, b.right, b.bottom)
         if (g.height() > fs * 2) {
-            graph(c, g, s.battHist, 100f, col)
-            label.textAlign = Paint.Align.LEFT; label.textSize = fs * 0.7f; label.color = cyan(140)
-            c.drawText("BATTERY LEVEL / 2 H", g.left + fs * 0.3f, g.top + fs * 0.9f, label); label.color = CYAN
+            graph(c, g, s.battHist, col, t)
+            caption(c, g, "BATTERY LEVEL / 2 H", fs * 0.7f)
         }
     }
 
@@ -504,57 +701,68 @@ class HudView(context: Context) : View(context) {
         val days = cal.getActualMaximum(Calendar.DAY_OF_MONTH)
         val today = now.get(Calendar.DAY_OF_MONTH)
         val rows = (first + days + 6) / 7
-        val headH = b.height() * 0.16f
-        label.textAlign = Paint.Align.LEFT; label.textSize = headH * 0.7f; label.letterSpacing = 0.2f
+        val headH = b.height() * 0.15f
         val mn = arrayOf("JANUARY", "FEBRUARY", "MARCH", "APRIL", "MAY", "JUNE", "JULY", "AUGUST", "SEPTEMBER", "OCTOBER", "NOVEMBER", "DECEMBER")
-        c.drawText("${mn[now.get(Calendar.MONTH)]} ${now.get(Calendar.YEAR)}", b.left, b.top + headH * 0.75f, label)
+        val title = "${mn[now.get(Calendar.MONTH)]} ${now.get(Calendar.YEAR)}"
+        label.textAlign = Paint.Align.LEFT; label.letterSpacing = 0.2f
+        label.textSize = min(headH * 0.7f, unit * 0.9f)
+        while (label.measureText(title) > b.width() && label.textSize > 8f) label.textSize *= 0.92f
+        c.drawText(title, b.left, b.top + headH * 0.72f, label)
         label.letterSpacing = 0f
         val cw = b.width() / 7; val gTop = b.top + headH * 1.15f
         val ch = (b.bottom - gTop) / (rows + 1)
         mono.textAlign = Paint.Align.CENTER
-        val fs = min(ch * 0.55f, cw * 0.5f)
+        val fs = min(ch * 0.55f, cw * 0.48f)
         val wk = arrayOf("S", "M", "T", "W", "T", "F", "S")
         for (k in 0 until 7) {
             mono.textSize = fs * 0.85f; mono.color = if (k == 0) Color.argb(200, 255, 110, 110) else cyan(150)
             c.drawText(wk[k], b.left + cw * (k + 0.5f), gTop + ch * 0.65f, mono)
         }
+        stroke.strokeWidth = 1f; stroke.color = cyan(50)
+        c.drawLine(b.left, gTop + ch * 0.95f, b.right, gTop + ch * 0.95f, stroke)
         for (d in 1..days) {
             val idx = first + d - 1; val col = idx % 7; val row = idx / 7 + 1
             val x = b.left + cw * (col + 0.5f); val y = gTop + ch * row + ch * 0.65f
             mono.textSize = fs
             if (d == today) {
-                fill.color = CYAN
-                c.drawRect(x - cw * 0.42f, gTop + ch * row + ch * 0.08f, x + cw * 0.42f, gTop + ch * (row + 1) - ch * 0.08f, fill)
+                val rr = RectF(x - cw * 0.42f, gTop + ch * row + ch * 0.08f, x + cw * 0.42f, gTop + ch * (row + 1) - ch * 0.08f)
+                glow.strokeWidth = 10f; glow.color = cyan(160); c.drawRect(rr, glow)
+                fill.color = CYAN; c.drawRect(rr, fill)
                 mono.color = DARK
-            } else mono.color = when { d < today -> cyan(80); col == 0 -> Color.argb(220, 255, 110, 110); else -> cyan(220) }
+            } else mono.color = when { d < today -> cyan(70); col == 0 -> Color.argb(220, 255, 110, 110); else -> cyan(220) }
             c.drawText(d.toString(), x, y, mono)
         }
         mono.color = CYAN
     }
 
-    private fun drawWeather(c: Canvas, r: RectF) {
+    private fun drawWeather(c: Canvas, r: RectF, t: Float) {
         val b = body(r); val s = stats
-        val fs = min(unit * 0.6f, b.height() / (if (wide) 9f else 11f))
+        val fs = min(unit * 0.6f, b.height() / (if (wide) 10f else 12f))
         label.textAlign = Paint.Align.LEFT; label.textSize = fs * 0.75f; label.color = cyan(160); label.letterSpacing = 0.15f
         c.drawText("SHIMIZU / SHIZUOKA", b.left, b.top + fs * 0.8f, label); label.letterSpacing = 0f
         val bigS = fs * 3.3f
-        mono.textAlign = Paint.Align.LEFT; mono.textSize = bigS; mono.color = CYAN
-        val tt = s.temp?.let { "${it.roundToInt()}" } ?: "--"
-        c.drawText(tt, b.left, b.top + fs * 1.2f + bigS * 0.85f, mono)
-        val w = mono.measureText(tt)
-        mono.textSize = fs * 1.3f; c.drawText("°C", b.left + w + fs * 0.2f, b.top + fs * 1.2f + bigS * 0.4f, mono)
+        val tt = if (s.temp != null) "${dTemp.roundToInt()}" else "--"
+        val w = bigNum(c, tt, b.left, b.top + fs * 1.2f + bigS * 0.85f, bigS, CYAN)
+        mono.textAlign = Paint.Align.LEFT; mono.textSize = fs * 1.3f
+        c.drawText("°C", b.left + w + fs * 0.2f, b.top + fs * 1.2f + bigS * 0.4f, mono)
         label.textAlign = Paint.Align.RIGHT; label.textSize = fs * 1.25f; label.color = CYAN
         c.drawText(s.weather, b.right, b.top + fs * 1.2f + bigS * 0.8f, label)
         var y = b.top + fs * 1.2f + bigS + fs * 1.1f
         kv(c, b.left, b.right, y, "FEELS", s.feels?.let { "${it.roundToInt()}°C" } ?: "--", fs); y += fs * 1.45f
         kv(c, b.left, b.right, y, "HUMIDITY", "${s.humidity}%", fs); y += fs * 1.45f
         kv(c, b.left, b.right, y, "WIND", String.format(Locale.US, "%.1fm/s", s.wind), fs); y += fs * 1.45f
-        if (y < b.bottom) { kv(c, b.left, b.right, y, "SUN ↑↓", "${s.sunrise}  ${s.sunset}", fs); y += fs * 1.6f }
-        if (!wide) {
+        kv(c, b.left, b.right, y, "SUN ↑↓", "${s.sunrise}  ${s.sunset}", fs); y += fs * 0.9f
+        run {
             s.forecast.drop(1).take(2).forEach {
-                if (y < b.bottom) { label.textAlign = Paint.Align.LEFT; label.textSize = fs * 0.95f; label.color = cyan(210); c.drawText(it, b.left, y, label); y += fs * 1.4f }
+                y += fs * 1.35f
+                label.textAlign = Paint.Align.LEFT; label.textSize = fs * 0.95f; label.color = cyan(210); c.drawText(it, b.left, y, label)
             }
-            label.color = CYAN
+            label.color = CYAN; y += fs * 0.6f
+        }
+        val g = RectF(b.left, y, b.right, b.bottom)
+        if (g.height() > fs * 2.5f && s.hourly.size > 2) {
+            graph(c, g, s.hourly, BLUE, t)
+            caption(c, g, String.format(Locale.US, "TEMP 24H   %d° – %d°", s.hourly.min().roundToInt(), s.hourly.max().roundToInt()), fs * 0.7f)
         }
     }
 
@@ -578,27 +786,154 @@ class HudView(context: Context) : View(context) {
     private fun drawNetwork(c: Canvas, r: RectF, t: Float) {
         val b = body(r); val s = stats
         val fs = min(unit * 0.6f, b.height() / 6f)
-        val infoW = if (wide) b.width() * 0.16f else b.width() * 0.32f
-        // readouts
-        label.textAlign = Paint.Align.LEFT; label.textSize = fs * 0.75f; label.color = cyan(160); label.letterSpacing = 0.15f
-        c.drawText("▼ DOWN", b.left, b.top + fs, label)
-        c.drawText("▲ UP", b.left, b.top + b.height() * 0.55f, label)
-        label.letterSpacing = 0f; label.color = CYAN
-        mono.textAlign = Paint.Align.LEFT; mono.textSize = fs * 1.5f; mono.color = CYAN
-        c.drawText(rate(s.rxKbps), b.left, b.top + fs * 2.6f, mono)
-        mono.color = Color.rgb(120, 200, 255)
-        c.drawText(rate(s.txKbps), b.left, b.top + b.height() * 0.55f + fs * 1.6f, mono)
-        mono.color = CYAN
-        val g = RectF(b.left + infoW, b.top, b.right, b.bottom)
-        val mx = max(max(s.rxHist.maxOrNull() ?: 0f, s.txHist.maxOrNull() ?: 0f), 32f) * 1.15f
-        graph(c, g, s.rxHist, mx, CYAN)
-        graph(c, g, s.txHist, mx, Color.rgb(120, 200, 255), gridLines = false)
-        // moving scan marker
+        val compact = b.width() < unit * 16
+        val infoW = if (compact) 0f else if (wide) b.width() * 0.16f else b.width() * 0.32f
+        val g = if (compact) RectF(b.left, b.top + fs * 2.6f, b.right, b.bottom) else RectF(b.left + infoW, b.top, b.right, b.bottom)
+        if (compact) {
+            label.textAlign = Paint.Align.LEFT; label.textSize = fs * 0.7f; label.color = cyan(160)
+            c.drawText("▼", b.left, b.top + fs * 1.9f, label)
+            c.drawText("▲", b.centerX(), b.top + fs * 1.9f, label); label.color = CYAN
+            bigNum(c, rate(s.rxKbps), b.left + fs, b.top + fs * 1.9f, fs * 1.05f, CYAN)
+            bigNum(c, rate(s.txKbps), b.centerX() + fs, b.top + fs * 1.9f, fs * 1.05f, BLUE)
+        } else {
+            label.textAlign = Paint.Align.LEFT; label.textSize = fs * 0.75f; label.color = cyan(160); label.letterSpacing = 0.15f
+            c.drawText("▼ DOWN", b.left, b.top + fs, label)
+            c.drawText("▲ UP", b.left, b.top + b.height() * 0.55f, label)
+            label.letterSpacing = 0f; label.color = CYAN
+            bigNum(c, rate(s.rxKbps), b.left, b.top + fs * 2.6f, fs * 1.5f, CYAN)
+            bigNum(c, rate(s.txKbps), b.left, b.top + b.height() * 0.55f + fs * 1.6f, fs * 1.5f, BLUE)
+        }
+        // sqrt scale so small traffic is visible
+        val rx = s.rxHist.map { sqrt(it) }; val tx = s.txHist.map { sqrt(it) }
+        val mx = max(max(rx.maxOrNull() ?: 0f, tx.maxOrNull() ?: 0f), sqrt(32f)) * 1.1f
+        graph(c, g, rx, CYAN, t, fixedMax = mx)
+        graph(c, g, tx, BLUE, t, fixedMax = mx, grid = false)
         val sx = g.left + ((t * 0.25f) % 1f) * g.width()
-        stroke.strokeWidth = 2f; stroke.color = cyan(90); c.drawLine(sx, g.top, sx, g.bottom, stroke)
+        fill.shader = LinearGradient(sx - unit * 2, 0f, sx, 0f, Color.TRANSPARENT, cyan(60), Shader.TileMode.CLAMP)
+        c.drawRect(sx - unit * 2, g.top, sx, g.bottom, fill); fill.shader = null
+        if (s.rxKbps < 1f && s.txKbps < 1f) {
+            label.textAlign = Paint.Align.CENTER; label.textSize = fs * 0.9f; label.letterSpacing = 0.4f
+            label.color = cyan(if ((t * 1.2f).toInt() % 2 == 0) 160 else 70)
+            c.drawText("LINK IDLE", g.centerX(), g.centerY(), label)
+            label.letterSpacing = 0f; label.color = CYAN
+        }
         mono.textAlign = Paint.Align.RIGHT; mono.textSize = fs * 0.6f; mono.color = cyan(130)
-        c.drawText("PEAK ${rate(mx / 1.15f)}  /  60s", g.right - fs * 0.3f, g.top + fs * 0.9f, mono)
+        val peak = max(s.rxHist.maxOrNull() ?: 0f, s.txHist.maxOrNull() ?: 0f)
+        if (!compact) c.drawText("PEAK ${rate(peak)}  /  60s", g.right - fs * 0.3f, g.top + fs * 0.9f, mono)
         mono.color = CYAN
+    }
+
+    // ---------- media ----------
+    private val mediaBtns = HashMap<String, RectF>()
+    private val mediaArt = RectF()
+
+    private fun fmtTime(ms: Long): String { val s = (ms / 1000).coerceAtLeast(0); return String.format(Locale.US, "%d:%02d", s / 60, s % 60) }
+
+    private fun drawMedia(c: Canvas, r: RectF, t: Float) {
+        val b = body(r); val m = media
+        mediaBtns.clear(); mediaArt.setEmpty()
+        val fs = min(unit * 0.6f, b.height() / 7f)
+        if (m == null) {
+            label.textAlign = Paint.Align.CENTER; label.textSize = fs * 0.9f; label.letterSpacing = 0.35f
+            label.color = cyan(if ((t * 1.2f).toInt() % 2 == 0) 140 else 70)
+            c.drawText("NO AUDIO SIGNAL", b.centerX(), b.centerY() - fs * 0.2f, label)
+            label.textSize = fs * 0.62f; label.letterSpacing = 0.1f; label.color = cyan(110)
+            c.drawText("音楽を再生するとここに表示", b.centerX(), b.centerY() + fs * 1.2f, label)
+            label.letterSpacing = 0f; label.color = CYAN
+            // idle flat visualizer
+            stroke.strokeWidth = 2f; stroke.color = cyan(60)
+            c.drawLine(b.left, b.bottom - fs * 0.5f, b.right, b.bottom - fs * 0.5f, stroke)
+            return
+        }
+        val btnH = fs * 1.9f
+        val artS = min(b.height() - btnH - fs * 0.6f, b.width() * 0.38f)
+        mediaArt.set(b.left, b.top, b.left + artS, b.top + artS)
+        // art with rotating ring frame
+        c.save()
+        val clip = Path().apply { addRoundRect(mediaArt, unit * 0.3f, unit * 0.3f, Path.Direction.CW) }
+        c.clipPath(clip)
+        if (m.art != null) c.drawBitmap(m.art, null, mediaArt, Paint(Paint.FILTER_BITMAP_FLAG))
+        else { fill.color = cyan(30); c.drawRect(mediaArt, fill); label.textAlign = Paint.Align.CENTER; label.textSize = artS * 0.4f; c.drawText("♪", mediaArt.centerX(), mediaArt.centerY() + artS * 0.14f, label) }
+        fill.color = Color.argb(40, 0, 229, 255); c.drawRect(mediaArt, fill)
+        c.restore()
+        glow.strokeWidth = 8f; glow.color = cyan(if (m.playing) 150 else 60); c.drawRoundRect(mediaArt, unit * 0.3f, unit * 0.3f, glow)
+        stroke.strokeWidth = 2f; stroke.color = CYAN; c.drawRoundRect(mediaArt, unit * 0.3f, unit * 0.3f, stroke)
+
+        // texts
+        val tx = mediaArt.right + fs * 0.7f; val tw = b.right - tx
+        label.textAlign = Paint.Align.LEFT; label.textSize = fs * 0.62f; label.color = cyan(150); label.letterSpacing = 0.2f
+        c.drawText(if (m.playing) "▶ NOW PLAYING" else "❚❚ PAUSED", tx, b.top + fs * 0.7f, label)
+        label.letterSpacing = 0f
+        label.textSize = fs * 1.05f; label.color = CYAN
+        c.drawText(android.text.TextUtils.ellipsize(m.title, android.text.TextPaint(label), tw, android.text.TextUtils.TruncateAt.END).toString(), tx, b.top + fs * 2.0f, label)
+        label.textSize = fs * 0.8f; label.color = cyan(190)
+        c.drawText(android.text.TextUtils.ellipsize(m.artist, android.text.TextPaint(label), tw, android.text.TextUtils.TruncateAt.END).toString(), tx, b.top + fs * 3.0f, label)
+        label.color = CYAN
+
+        // visualizer
+        val vTop = b.top + fs * 3.5f; val vBot = mediaArt.bottom - fs * 1.3f
+        if (vBot - vTop > fs * 0.6f) {
+            val n = 24; val bw = tw / n
+            for (k in 0 until n) {
+                val e = if (m.playing) (0.15f + 0.85f * abs(sin(t * (3.1f + k * 0.37f) + k * 1.7f) * sin(t * 1.3f + k * 0.5f))) else 0.06f
+                val h = (vBot - vTop) * e
+                fill.shader = LinearGradient(0f, vBot - h, 0f, vBot, CYAN, cyan(60), Shader.TileMode.CLAMP)
+                c.drawRect(tx + k * bw + bw * 0.18f, vBot - h, tx + (k + 1) * bw - bw * 0.18f, vBot, fill); fill.shader = null
+            }
+        }
+        // progress
+        val pos = if (m.playing) m.position + ((android.os.SystemClock.elapsedRealtime() - m.updateTime) * m.speed).toLong() else m.position
+        val py0 = mediaArt.bottom - fs * 0.35f
+        if (m.duration > 0) {
+            val f = (pos.toFloat() / m.duration).coerceIn(0f, 1f)
+            fill.color = cyan(40); c.drawRect(tx, py0 - 4, b.right, py0 + 4, fill)
+            fill.color = CYAN; c.drawRect(tx, py0 - 4, tx + tw * f, py0 + 4, fill)
+            glow.strokeWidth = 6f; glow.color = cyan(160); c.drawLine(tx, py0, tx + tw * f, py0, glow)
+            fill.color = Color.WHITE; c.drawCircle(tx + tw * f, py0, unit * 0.16f, fill)
+            mono.textAlign = Paint.Align.LEFT; mono.textSize = fs * 0.6f; mono.color = cyan(170)
+            c.drawText(fmtTime(pos), tx, py0 - fs * 0.45f, mono)
+            mono.textAlign = Paint.Align.RIGHT; c.drawText(fmtTime(m.duration), b.right, py0 - fs * 0.45f, mono)
+            mono.color = CYAN
+        }
+        // buttons
+        val by = b.bottom - btnH
+        val bw = (b.width() - fs) / 3
+        listOf("prev" to "⏮", "toggle" to (if (m.playing) "❚❚" else "▶"), "next" to "⏭").forEachIndexed { i, (key, sym) ->
+            val rr = RectF(b.left + i * (bw + fs / 2), by, b.left + i * (bw + fs / 2) + bw, b.bottom)
+            mediaBtns[key] = rr
+            val prim = key == "toggle"
+            fill.color = cyan(if (prim) 60 else 20); c.drawRect(rr, fill)
+            if (prim) { glow.strokeWidth = 6f; glow.color = cyan(120); c.drawRect(rr, glow) }
+            stroke.strokeWidth = 2f; stroke.color = cyan(if (prim) 230 else 150); c.drawRect(rr, stroke)
+            label.textAlign = Paint.Align.CENTER; label.textSize = btnH * 0.48f; label.color = CYAN
+            c.drawText(sym, rr.centerX(), rr.centerY() + label.textSize * 0.36f, label)
+        }
+    }
+
+    private fun drawFlash(c: Canvas) {
+        val r = flashRect ?: return
+        val age = System.currentTimeMillis() - flashStart
+        if (age > 700) { flashRect = null; return }
+        val p = age / 450f
+        val fx = r.centerX(); val fy = r.centerY()
+        val maxR = hypot(width.toFloat(), height.toFloat())
+        for (k in 0 until 3) {
+            val q = (p - k * 0.12f).coerceIn(0f, 1f)
+            if (q <= 0f) continue
+            glow.strokeWidth = 14f; glow.color = cyan((200 * (1 - q)).toInt()); c.drawCircle(fx, fy, maxR * 0.6f * ease(q), glow)
+            stroke.strokeWidth = 3f; stroke.color = cyan((255 * (1 - q)).toInt()); c.drawCircle(fx, fy, maxR * 0.6f * ease(q), stroke)
+        }
+        // targeting brackets
+        val a = unit * 1.4f * (1.6f - min(1f, p) * 0.6f)
+        stroke.strokeWidth = 5f; stroke.color = CYAN
+        for ((dx, dy) in listOf(-1f to -1f, 1f to -1f, -1f to 1f, 1f to 1f)) {
+            val x = fx + dx * a; val y = fy + dy * a
+            c.drawLine(x, y, x - dx * a * 0.5f, y, stroke); c.drawLine(x, y, x, y - dy * a * 0.5f, stroke)
+        }
+        label.textAlign = Paint.Align.CENTER; label.textSize = unit * 0.8f; label.letterSpacing = 0.3f; label.color = CYAN
+        val ty = if (fy > height * 0.3f) fy - a * 1.4f else fy + a * 1.8f
+        c.drawText("LAUNCHING  ${flashLabel.uppercase()}", fx, ty, label); label.letterSpacing = 0f
+        postInvalidateOnAnimation()
     }
 
     private fun rate(kbps: Float) = if (kbps >= 1024) String.format(Locale.US, "%.1f MB/s", kbps / 1024) else String.format(Locale.US, "%.0f KB/s", kbps)
@@ -606,23 +941,24 @@ class HudView(context: Context) : View(context) {
     private fun drawStatus(c: Canvas, r: RectF, t: Float) {
         val s = stats
         val y1 = r.top + r.height() * 0.42f; val y2 = r.top + r.height() * 0.82f
-        val up = s.uptimeMs / 1000
         label.textAlign = Paint.Align.LEFT; label.textSize = r.height() * 0.26f; label.letterSpacing = 0.2f
-        val blink = ((t * 1.5f).toInt() % 2 == 0)
-        label.color = if (blink) CYAN else cyan(110)
+        label.color = if ((t * 1.5f).toInt() % 2 == 0) CYAN else cyan(110)
         c.drawText("● ALL SYSTEMS NOMINAL", r.left + unit * 0.6f, y1, label)
         label.letterSpacing = 0f; label.color = CYAN
         mono.textAlign = Paint.Align.RIGHT; mono.textSize = r.height() * 0.24f; mono.color = cyan(200)
-        c.drawText(String.format(Locale.US, "UPTIME %02d:%02d:%02d", up / 3600, up / 60 % 60, up % 60), r.right - unit * 0.6f, y1, mono)
+        c.drawText(String.format(Locale.US, "MEM %02d%%  PWR %02d%%", dMem.roundToInt(), dBatt.roundToInt()), r.right - unit * 0.6f, y1, mono)
         mono.textAlign = Paint.Align.LEFT; mono.textSize = r.height() * 0.2f; mono.color = cyan(100)
-        c.drawText(hexStream((t * 4).toLong() + 99, 44), r.left + unit * 0.6f, y2, mono)
+        var hs = hexStream((t * 4).toLong() + 99, 60)
+        while (mono.measureText(hs) > r.width() - unit * 1.2f && hs.length > 4) hs = hs.dropLast(5)
+        c.drawText(hs, r.left + unit * 0.6f, y2, mono)
         mono.color = CYAN
     }
 
     // ======================= INPUT =======================
     override fun onTouchEvent(e: MotionEvent): Boolean = gestures.onTouchEvent(e)
 
-    private fun segmentAt(x: Float, y: Float): Seg? {
+    private fun segmentAt(x0: Float, y0: Float): Seg? {
+        val x = x0 - px * 0.5f; val y = y0 - py * 0.5f
         val d = hypot(x - cx, y - cy)
         if (d < segR1 || d > segR2 * 1.05f) return null
         val segs = segments(); val n = segs.size; val sw = 360f / n
@@ -634,10 +970,22 @@ class HudView(context: Context) : View(context) {
     private fun tap(x: Float, y: Float) {
         if (y < topStrip.bottom + unit * 0.5f && x < width * 0.5f) { listener?.onTopStripTap(); return }
         segmentAt(x, y)?.let { s ->
-            when { s.isApps || s.app == null -> listener?.onOpenDrawer(); else -> listener?.onLaunch(s.app) }
+            when {
+                s.isApps || s.app == null -> listener?.onOpenDrawer()
+                else -> {
+                    val src = Rect((x - unit * 2).toInt(), (y - unit * 2).toInt(), (x + unit * 2).toInt(), (y + unit * 2).toInt())
+                    flashLaunch(src, s.app.label)
+                    listener?.onLaunch(s.app, src)
+                }
+            }
             return
         }
-        if (hypot(x - cx, y - cy) < coreR * 0.55f) { listener?.onClockTap(); return }
+        if (panels["MEDIA"]?.contains(x, y) == true && media != null) {
+            for ((k, r) in mediaBtns) if (r.contains(x, y)) { listener?.onMediaAction(k); return }
+            if (mediaArt.contains(x, y)) { listener?.onMediaAction("open"); return }
+            return
+        }
+        if (hypot(x - cx - px * 0.5f, y - cy - py * 0.5f) < coreR * 0.55f) { listener?.onClockTap(); return }
         for ((name, r) in panels) if (r.contains(x, y)) { listener?.onPanelTap(name); return }
     }
 
