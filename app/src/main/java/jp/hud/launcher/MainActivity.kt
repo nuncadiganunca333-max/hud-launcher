@@ -112,6 +112,9 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
         loadApps()
         hud.start()
         handler.post(statsLoop)
+        hud.wake()
+        applyKeepScreen()
+        startVisualizer()
         val enabled = notifAccessEnabled()
         hud.notifLink = enabled
         hud.voiceOn = prefs.getBoolean("voice", true)
@@ -140,6 +143,8 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
 
     override fun onPause() {
         super.onPause()
+        stopVisualizer()
+        window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         stopMedia()
         hud.stop()
         handler.removeCallbacks(statsLoop)
@@ -188,8 +193,15 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
     private fun showNext(speak: Boolean) {
         val n = alertQueue.firstOrNull() ?: run { alert.hide(); return }
         closeDrawer()
-        alert.show(n, alertQueue.size - 1)
-        if (speak) { SoundFx.play(SoundFx.Fx.ALERT); handler.postDelayed({ if (alert.isShowing && alertQueue.firstOrNull()?.key == n.key) say(n) }, 700) }
+        if (speak) {
+            // 光の線がコアに飛び込んでから警告パネルを開く
+            hud.incoming(); SoundFx.play(SoundFx.Fx.ALERT)
+            handler.postDelayed({
+                if (alertQueue.firstOrNull()?.key != n.key) return@postDelayed
+                alert.show(n, alertQueue.size - 1)
+                handler.postDelayed({ if (alert.isShowing && alertQueue.firstOrNull()?.key == n.key) say(n) }, 700)
+            }, 650)
+        } else alert.show(n, alertQueue.size - 1)
     }
 
     private fun say(n: NotifItem) {
@@ -201,6 +213,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
     }
 
     private fun onSpoken(id: String) {
+        hud.speaking = false
         if (id.startsWith("alert:")) {
             val key = id.removePrefix("alert:")
             val n = alertQueue.firstOrNull()
@@ -223,7 +236,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
         r.setRecognitionListener(object : android.speech.RecognitionListener {
             override fun onReadyForSpeech(p: Bundle?) {}
             override fun onBeginningOfSpeech() {}
-            override fun onRmsChanged(rms: Float) { alert.micLevel = ((rms + 2f) / 12f).coerceIn(0f, 1f) }
+            override fun onRmsChanged(rms: Float) { alert.micLevel = ((rms + 2f) / 12f).coerceIn(0f, 1f); hud.voiceLevel = alert.micLevel * 0.6f }
             override fun onBufferReceived(b: ByteArray?) {}
             override fun onEndOfSpeech() { alert.micLevel = 0f }
             override fun onError(error: Int) { alert.listening = false }
@@ -447,6 +460,61 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
         }
     }
 
+    // ---------- screen / effects ----------
+    override fun onPanelsAlpha(a: Float) {
+        moduleFrame.alpha = a
+        moduleFrame.visibility = if (a < 0.05f) View.INVISIBLE else View.VISIBLE
+    }
+
+    override fun onUserActivity() { applyKeepScreen() }
+
+    private fun applyKeepScreen() {
+        val mode = prefs.getInt("screenOn", 0)
+        val on = when (mode) { 0 -> true; 1 -> hud.stats.charging; else -> false }
+        if (on) window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        else window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+    }
+
+    private var visualizer: android.media.audiofx.Visualizer? = null
+
+    private fun startVisualizer() {
+        if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) != android.content.pm.PackageManager.PERMISSION_GRANTED) return
+        try {
+            val v = android.media.audiofx.Visualizer(0)
+            v.captureSize = android.media.audiofx.Visualizer.getCaptureSizeRange()[0].coerceAtLeast(128)
+            val bands = FloatArray(32)
+            v.setDataCaptureListener(object : android.media.audiofx.Visualizer.OnDataCaptureListener {
+                override fun onWaveFormDataCapture(vz: android.media.audiofx.Visualizer?, w: ByteArray?, rate: Int) {}
+                override fun onFftDataCapture(vz: android.media.audiofx.Visualizer?, fft: ByteArray?, rate: Int) {
+                    fft ?: return
+                    val n = fft.size / 2
+                    var any = 0f
+                    for (b in 0 until 32) {
+                        // log-spaced bins
+                        val lo = (Math.pow(n.toDouble(), b / 32.0)).toInt().coerceIn(1, n - 1)
+                        val hi = (Math.pow(n.toDouble(), (b + 1) / 32.0)).toInt().coerceIn(lo + 1, n)
+                        var mx = 0f
+                        for (k in lo until hi) {
+                            val re = fft[2 * k].toFloat(); val im = fft[2 * k + 1].toFloat()
+                            mx = maxOf(mx, kotlin.math.sqrt(re * re + im * im))
+                        }
+                        val v2 = (kotlin.math.ln(1f + mx) / 4.5f).coerceIn(0f, 1f)
+                        bands[b] = bands[b] * 0.5f + v2 * 0.5f
+                        any += v2
+                    }
+                    hud.spectrum = if (any > 0.05f) bands.copyOf() else null
+                }
+            }, android.media.audiofx.Visualizer.getMaxCaptureRate() / 2, false, true)
+            v.enabled = true
+            visualizer = v
+        } catch (e: Exception) { visualizer = null; hud.spectrum = null }
+    }
+
+    private fun stopVisualizer() {
+        try { visualizer?.enabled = false; visualizer?.release() } catch (e: Exception) { }
+        visualizer = null
+    }
+
     // ---------- voice (TTS) ----------
     private var fxPlayer: android.media.MediaPlayer? = null
     private var reverb: android.media.audiofx.PresetReverb? = null
@@ -479,6 +547,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
         val t = tts ?: return
         if (!ttsReady) return
         stopSpeech()
+        hud.speaking = true
         if (prefs.getBoolean("ttsFx", true)) {
             val f = java.io.File(cacheDir, "tts_out.wav")
             t.synthesizeToFile(text, null, f, "fx:$id")
@@ -513,6 +582,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
 
     private fun stopSpeech() {
         tts?.stop()
+        if (::hud.isInitialized) hud.speaking = false
         fxPlayer?.let { try { it.stop() } catch (e: Exception) { }; it.release() }
         fxPlayer = null
     }
@@ -582,13 +652,18 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
         AlertDialog.Builder(this).setTitle("HUD 設定")
             .setItems(arrayOf("Claude APIキーを設定", "呼び名を変更（いま：${callName()}）", "声を選ぶ", "声の高さ・速さ",
                 "声のエフェクト（残響）：${if (prefs.getBoolean("ttsFx", true)) "ON" else "OFF"}", "読み上げエンジンを切り替え",
-                "会話をリセット", "アラーム一覧を開く", "ホームアプリを切り替え")) { _, w ->
+                "会話をリセット", "アラーム一覧を開く", "ホームアプリを切り替え",
+                "画面の常時点灯：${arrayOf("常に", "充電中のみ", "OFF")[prefs.getInt("screenOn", 0)]}")) { _, w ->
                 when (w) {
                     0 -> askApiKey(); 1 -> askName(); 2 -> pickVoice(); 3 -> tuneVoice()
                     4 -> { val v = !prefs.getBoolean("ttsFx", true); prefs.edit().putBoolean("ttsFx", v).apply(); speakOut(sample(), "preview") }
                     5 -> pickEngine()
                     6 -> { agent.reset(); toast("会話をリセットしました") }
                     7 -> safeStart(Intent(AlarmClock.ACTION_SHOW_ALARMS)); 8 -> onHomeSettings()
+                    9 -> AlertDialog.Builder(this).setTitle("ホーム表示中の画面")
+                        .setSingleChoiceItems(arrayOf("常に点灯（触らないと待機モードで暗くなります）", "充電中のみ常に点灯", "通常どおり自動で消灯"), prefs.getInt("screenOn", 0)) { d, which ->
+                            prefs.edit().putInt("screenOn", which).apply(); applyKeepScreen(); d.dismiss()
+                        }.show()
                 }
             }.show()
     }
@@ -622,6 +697,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
             requestPermissions(arrayOf(android.Manifest.permission.RECORD_AUDIO), REQ_MIC); return
         }
         closeDrawer()
+        hud.wake()
         assistant.open()
         listen()
     }
@@ -649,7 +725,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
         r.setRecognitionListener(object : android.speech.RecognitionListener {
             override fun onReadyForSpeech(p: Bundle?) {}
             override fun onBeginningOfSpeech() {}
-            override fun onRmsChanged(rms: Float) { assistant.level = ((rms + 2f) / 12f).coerceIn(0f, 1f) }
+            override fun onRmsChanged(rms: Float) { assistant.level = ((rms + 2f) / 12f).coerceIn(0f, 1f); hud.voiceLevel = assistant.level }
             override fun onBufferReceived(b: ByteArray?) {}
             override fun onEndOfSpeech() { assistant.level = 0f }
             override fun onError(error: Int) {
@@ -1066,6 +1142,7 @@ $notifs
                 done = true
                 if (loc != null) {
                     lat = loc.latitude; lon = loc.longitude
+                    hud.geoLat = lat; hud.geoLon = lon
                     thread {
                         try {
                             @Suppress("DEPRECATION")

@@ -65,6 +65,8 @@ class HudView(context: Context) : View(context), SensorEventListener {
         fun onCoreLongPress()
         fun onModuleRect(r: RectF)
         fun onModuleEdit()
+        fun onPanelsAlpha(a: Float)
+        fun onUserActivity()
     }
 
     var listener: Listener? = null
@@ -76,6 +78,12 @@ class HudView(context: Context) : View(context), SensorEventListener {
         set(v) { field = v; invalidate() }
     var stats = Stats()
         set(v) { field = v; invalidate() }
+    // ---- external inputs for effects ----
+    var geoLat = 35.02; var geoLon = 138.48
+    var speaking = false          // assistant voice output
+    var voiceLevel = 0f           // mic level while listening
+    var spectrum: FloatArray? = null  // music FFT bands 0..1
+    var idleTimeoutMs = 45000L
     var moduleLinked = false
         set(v) { field = v; invalidate() }
     fun moduleBody(): RectF? = panels["MODULE"]?.let { RectF(it.left + unit * 0.35f, it.top + headerH() + unit * 0.25f, it.right - unit * 0.35f, it.bottom - unit * 0.3f) }
@@ -117,6 +125,19 @@ class HudView(context: Context) : View(context), SensorEventListener {
     private var px = 0f; private var py = 0f
     private var dX = 0f; private var dY = 0f
     private val camera = android.graphics.Camera()
+    private var lastTouch = System.currentTimeMillis()
+    private var idleP = 0f
+    private var lastPanelsAlpha = -1f
+    private class Ripple(val x: Float, val y: Float, val t0: Long)
+    private val ripples = ArrayList<Ripple>()
+    private var incomingAt = 0L
+    private var expanded: String? = null
+    private var expandAt = 0L
+    private var collapsing = false
+    private val expandRect = RectF()
+    private val expandOpenBtn = RectF()
+    private var lastWide: Boolean? = null
+    private var speakEnv = 0f
     private val m3d = Matrix()
 
     // ---- layout ----
@@ -193,6 +214,8 @@ class HudView(context: Context) : View(context), SensorEventListener {
     private fun relayout(w: Int, h: Int) {
         val W = w.toFloat(); val H = h.toFloat()
         wide = W / H > 0.75f
+        if (lastWide != null && lastWide != wide) { bootStart = System.currentTimeMillis(); expanded = null }
+        lastWide = wide
         panels.clear()
         unit = if (wide) min(W, H) / 40f else W / 26f
         val m = unit * 0.6f
@@ -330,17 +353,27 @@ class HudView(context: Context) : View(context), SensorEventListener {
     // ======================= FRAME =======================
     private fun ease(p: Float) = 1f - (1f - p.coerceIn(0f, 1f)).pow(3)
 
+    fun incoming() { incomingAt = System.currentTimeMillis(); wake(); invalidate() }
+
+    fun wake() { lastTouch = System.currentTimeMillis() }
+
     override fun onDraw(c: Canvas) {
         val bg = bgLayer ?: return; val fg = fgLayer ?: return
         val t = (System.nanoTime() - startTime) / 1e9f
+        val nowMs = System.currentTimeMillis()
         val now = Calendar.getInstance()
-        val boot = ((System.currentTimeMillis() - bootStart) / 1300f).coerceIn(0f, 1f)
+        val boot = ((nowMs - bootStart) / 1300f).coerceIn(0f, 1f)
         val eb = ease(boot)
+
+        // idle (screensaver) state
+        val idleTarget = if (nowMs - lastTouch > idleTimeoutMs && expanded == null) 1f else 0f
+        idleP += (idleTarget - idleP) * (if (idleTarget > idleP) 0.03f else 0.12f)
 
         // smoothing
         val s = stats
         dBatt += (s.battery - dBatt) * 0.08f; dMem += (s.memory - dMem) * 0.08f; dSto += (s.storage - dSto) * 0.08f
         dTemp += ((s.temp ?: 0f) - dTemp) * 0.08f
+        speakEnv += ((if (speaking) (0.35f + 0.65f * abs(sin(t * 11f) * sin(t * 4.3f + 1f))) else voiceLevel) - speakEnv) * 0.35f
         // parallax
         val tx = ((gx - bx) * unit * 9f).coerceIn(-unit * 1.4f, unit * 1.4f)
         val ty = ((gy - by) * unit * 9f).coerceIn(-unit * 1.4f, unit * 1.4f)
@@ -348,35 +381,49 @@ class HudView(context: Context) : View(context), SensorEventListener {
         dX = px + sin(t * 0.45f) * unit * 0.55f
         dY = py + cos(t * 0.37f) * unit * 0.4f
 
-        // background (moves opposite)
+        // burn-in protection: slow pixel drift of the whole scene
+        c.save()
+        c.translate(sin(t / 60f) * 4f, cos(t / 47f) * 4f)
+
         layerPaint.alpha = (255 * min(1f, boot * 2.5f)).toInt()
         c.drawBitmap(bg, -bgMargin - px * 0.7f, -bgMargin - py * 0.7f, layerPaint)
+        drawDataRain(c, t)
 
-        // core (moves with tilt, boots by spinning in)
+        // core group
         c.save()
         c.translate(dX * 0.5f, dY * 0.5f)
+        drawProjector(c, t)
         camera.save(); camera.rotateX(-dY / unit * 4f); camera.rotateY(dX / unit * 4f); camera.getMatrix(m3d); camera.restore()
         m3d.preTranslate(-cx, -cy); m3d.postTranslate(cx, cy); c.concat(m3d)
+        // idle: core drifts to centre of screen and grows a little
+        if (idleP > 0.001f) {
+            val e = ease(idleP)
+            c.translate((width / 2f - cx) * e, (height / 2f - cy) * e)
+            c.scale(1f + 0.12f * e, 1f + 0.12f * e, cx, cy)
+        }
         if (boot < 1f) {
             c.saveLayerAlpha(null, (255 * eb).toInt())
             c.scale(0.55f + 0.45f * eb, 0.55f + 0.45f * eb, cx, cy)
             c.rotate((1f - eb) * -140f, cx, cy)
         }
         drawCore(c, t, now)
+        drawSpectrumRing(c, t)
         if (boot < 1f) c.restore()
         c.restore()
 
-        // panels: reveal from center
-        val pb = ease((boot - 0.25f) / 0.75f)
-        if (pb > 0f) {
+        // panels: reveal from center (and retract in idle)
+        val pb = ease((boot - 0.25f) / 0.75f) * (1f - ease(idleP))
+        val pa = if (expanded != null) 0.25f else pb
+        if (abs(pa - lastPanelsAlpha) > 0.02f || (pa == 1f && lastPanelsAlpha != 1f) || (pa == 0f && lastPanelsAlpha != 0f)) {
+            lastPanelsAlpha = pa; listener?.onPanelsAlpha(pa)
+        }
+        if (pb > 0.002f) {
             c.save()
             val half = width / 2f * pb
             c.clipRect(width / 2f - half, 0f, width / 2f + half, height.toFloat())
-            // top strip (flat)
             val ts = RectF(0f, 0f, width.toFloat(), topStrip.bottom + unit * 0.3f)
             c.drawBitmap(fg, Rect(ts.left.toInt(), ts.top.toInt(), ts.right.toInt(), ts.bottom.toInt()), ts, null)
             drawTopStrip(c, t, now)
-            // each panel on its own tilted plane (cockpit-style wraparound)
             var k = 0
             for ((name, r) in panels) {
                 c.save()
@@ -386,14 +433,8 @@ class HudView(context: Context) : View(context), SensorEventListener {
                 val src = RectF(r.left - pad, r.top - pad, r.right + pad, r.bottom + pad)
                 c.drawBitmap(fg, Rect(src.left.toInt(), src.top.toInt(), src.right.toInt(), src.bottom.toInt()), src, null)
                 sheen(c, r, t, k++)
-                // content floats a little above the frame
                 c.save(); if (name != "MODULE") c.translate(dX * 0.07f, dY * 0.07f)
-                when (name) {
-                    "SYSTEM" -> drawSystem(c, r, t); "POWER" -> drawPower(c, r, t)
-                    "CALENDAR" -> drawCalendar(c, r, now); "WEATHER" -> drawWeather(c, r, t)
-                    "MEDIA" -> drawMedia(c, r, t); "MODULE" -> drawModule(c, r, t)
-                    "NETWORK" -> drawNetwork(c, r, t)
-                }
+                drawPanelContent(c, name, r, t, now)
                 c.restore()
                 c.restore()
             }
@@ -407,12 +448,254 @@ class HudView(context: Context) : View(context), SensorEventListener {
         }
 
         ovLayer?.let { c.drawBitmap(it, 0f, 0f, null) }
+        drawRipples(c, nowMs)
+        drawIncoming(c, nowMs)
+        drawExpanded(c, t, now, nowMs)
         drawFlash(c)
         val sy = ((t * 0.1f) % 1f) * height
         fill.color = Color.WHITE; fill.shader = LinearGradient(0f, sy - unit * 2, 0f, sy, Color.TRANSPARENT, cyan(22), Shader.TileMode.CLAMP)
         c.drawRect(0f, sy - unit * 2, width.toFloat(), sy, fill); fill.shader = null
+        c.restore()
 
-        if (running) { if (boot < 1f) postInvalidateOnAnimation() else postInvalidateDelayed(33) }
+        // idle dimming
+        if (idleP > 0.01f) {
+            fill.color = Color.argb((140 * ease(idleP)).toInt(), 0, 0, 0); c.drawRect(0f, 0f, width.toFloat(), height.toFloat(), fill)
+            if (idleP > 0.6f) {
+                label.textAlign = Paint.Align.CENTER; label.textSize = unit * 0.5f; label.letterSpacing = 0.4f
+                label.color = cyan((60 + 40 * sin(t * 1.5f)).toInt())
+                c.drawText("STANDBY  ―  TOUCH TO RESUME", width / 2f, height - insetBottom - unit * 1.5f, label)
+                label.letterSpacing = 0f; label.color = CYAN
+            }
+        }
+        drawBootLog(c, nowMs)
+
+        if (running) {
+            val anim = boot < 1f || expanded != null || ripples.isNotEmpty() || nowMs - incomingAt < 800 || abs(idleP - idleTarget) > 0.01f
+            when { anim -> postInvalidateOnAnimation(); idleP > 0.9f -> postInvalidateDelayed(66); else -> postInvalidateDelayed(33) }
+        }
+    }
+
+    private fun drawPanelContent(c: Canvas, name: String, r: RectF, t: Float, now: Calendar) {
+        when (name) {
+            "SYSTEM" -> drawSystem(c, r, t); "POWER" -> drawPower(c, r, t)
+            "CALENDAR" -> drawCalendar(c, r, now); "WEATHER" -> drawWeather(c, r, t)
+            "MEDIA" -> drawMedia(c, r, t); "MODULE" -> drawModule(c, r, t)
+            "NETWORK" -> drawNetwork(c, r, t)
+        }
+    }
+
+    // ===== ⑩ data rain =====
+    private fun drawDataRain(c: Canvas, t: Float) {
+        val cols = if (wide) 26 else 14
+        mono.textAlign = Paint.Align.CENTER; mono.textSize = unit * 0.42f
+        val step = mono.textSize * 1.25f
+        for (k in 0 until cols) {
+            val r = Random(k * 7919)
+            val x = (k + 0.5f) * width / cols + (r.nextFloat() - 0.5f) * unit
+            val speed = 0.6f + r.nextFloat() * 1.4f
+            val len = 6 + r.nextInt(14)
+            val head = ((t * speed * 3f + r.nextFloat() * 50f) % 40f) * step * 2f - step * len
+            for (j in 0 until len) {
+                val y = head + j * step
+                if (y < 0 || y > height) continue
+                val a = (j.toFloat() / len)
+                mono.color = if (j == len - 1) cyan(170) else cyan((70 * a).toInt())
+                val ch = "0123456789ABCDEF"[Random((k * 131 + j + (t * 8).toInt()) % 9973).nextInt(16)]
+                c.drawText(ch.toString(), x, y, mono)
+            }
+        }
+        mono.color = CYAN
+    }
+
+    // ===== ② hologram projector base =====
+    private fun drawProjector(c: Canvas, t: Float) {
+        val by = cy + coreR * 1.38f
+        val rx = coreR * 1.05f; val ry = coreR * 0.2f
+        // light cone up into the core
+        val cone = Path().apply { moveTo(cx - rx * 0.55f, by); lineTo(cx - coreR * 0.95f, cy); lineTo(cx + coreR * 0.95f, cy); lineTo(cx + rx * 0.55f, by); close() }
+        fill.color = Color.WHITE
+        fill.shader = LinearGradient(0f, by, 0f, cy, cyan(55), cyan(0), Shader.TileMode.CLAMP)
+        c.drawPath(cone, fill); fill.shader = null
+        // perspective grid disc
+        for (k in 1..5) {
+            val f = k / 5f
+            stroke.strokeWidth = if (k == 5) 3f else 1.5f; stroke.color = cyan(if (k == 5) 200 else 70)
+            c.drawOval(cx - rx * f, by - ry * f, cx + rx * f, by + ry * f, stroke)
+        }
+        for (k in 0 until 16) {
+            val a = (k / 16f) * 2 * PI.toFloat() + t * 0.2f
+            stroke.strokeWidth = 1f; stroke.color = cyan(55)
+            c.drawLine(cx, by, cx + cos(a) * rx, by + sin(a) * ry, stroke)
+        }
+        val pulse = (t * 0.6f) % 1f
+        stroke.strokeWidth = 3f; stroke.color = cyan((200 * (1 - pulse)).toInt())
+        c.drawOval(cx - rx * pulse, by - ry * pulse, cx + rx * pulse, by + ry * pulse, stroke)
+        glow.strokeWidth = 14f; glow.color = cyan(120); c.drawOval(cx - rx, by - ry, cx + rx, by + ry, glow)
+    }
+
+    // ===== ① wireframe globe =====
+    private fun drawGlobe(c: Canvas, r: Float, t: Float) {
+        val tilt = Math.toRadians(22.0)
+        val rot = Math.toRadians((t * 12.0) % 360.0)
+        fun proj(latD: Double, lonD: Double): FloatArray {
+            val lat = Math.toRadians(latD); val lon = Math.toRadians(lonD) + rot
+            val x = cos(lat) * sin(lon); val y0 = sin(lat); val z0 = cos(lat) * cos(lon)
+            val y = y0 * cos(tilt) - z0 * sin(tilt); val z = y0 * sin(tilt) + z0 * cos(tilt)
+            return floatArrayOf(cx + (x * r).toFloat(), cy - (y * r).toFloat(), z.toFloat())
+        }
+        fun line(points: List<FloatArray>) {
+            for (i in 1 until points.size) {
+                val a = points[i - 1]; val b = points[i]
+                val front = a[2] > 0 && b[2] > 0
+                stroke.strokeWidth = if (front) 1.6f else 1f; stroke.color = cyan(if (front) 95 else 22)
+                c.drawLine(a[0], a[1], b[0], b[1], stroke)
+            }
+        }
+        for (lon in 0 until 360 step 30) line((-90..90 step 10).map { proj(it.toDouble(), lon.toDouble()) })
+        for (lat in -60..60 step 30) line((0..360 step 10).map { proj(lat.toDouble(), it.toDouble()) })
+        // scattered "city lights"
+        val rnd = Random(3)
+        repeat(90) {
+            val p = proj(rnd.nextDouble() * 140 - 60, rnd.nextDouble() * 360)
+            if (p[2] > 0) { fill.color = cyan((60 + 120 * p[2]).toInt()); c.drawCircle(p[0], p[1], 1.8f, fill) }
+        }
+        // current location pin (longitude relative to rotation frame)
+        val pin = proj(geoLat, geoLon - 138.48 + 0.0)
+        if (pin[2] > 0) {
+            val pr = unit * 0.16f * (1f + 0.5f * sin(t * 5f))
+            fill.color = Color.rgb(255, 90, 90); c.drawCircle(pin[0], pin[1], unit * 0.12f, fill)
+            stroke.strokeWidth = 2f; stroke.color = Color.argb(200, 255, 90, 90); c.drawCircle(pin[0], pin[1], pr * 2.2f, stroke)
+            stroke.color = Color.argb(150, 255, 90, 90); c.drawLine(pin[0], pin[1], pin[0] + unit * 1.2f, pin[1] - unit * 0.8f, stroke)
+            mono.textAlign = Paint.Align.LEFT; mono.textSize = unit * 0.3f; mono.color = Color.argb(220, 255, 120, 120)
+            c.drawText(String.format(Locale.US, "%.2fN %.2fE", geoLat, geoLon), pin[0] + unit * 1.25f, pin[1] - unit * 0.85f, mono)
+            mono.color = CYAN
+        }
+        stroke.strokeWidth = 2f; stroke.color = cyan(110); c.drawCircle(cx, cy, r, stroke)
+    }
+
+    // ===== ④ music-reactive ring =====
+    private fun drawSpectrumRing(c: Canvas, t: Float) {
+        val m = media ?: return
+        if (!m.playing) return
+        val sp = spectrum
+        val n = 64
+        val r0 = coreR * 1.025f
+        for (k in 0 until n) {
+            val band = if (sp != null && sp.isNotEmpty()) sp[(k % (n / 2)).coerceAtMost(sp.size - 1) * sp.size / (n / 2)]
+                else 0.25f + 0.75f * abs(sin(t * (2.3f + (k % 7) * 0.4f) + k) * sin(t * 1.1f + k * 0.3f))
+            val len = unit * (0.2f + 1.4f * band.coerceIn(0f, 1f))
+            val a = 2 * PI.toFloat() * k / n - PI.toFloat() / 2
+            stroke.strokeWidth = unit * 0.12f; stroke.color = cyan((120 + 120 * band).toInt())
+            c.drawLine(cx + cos(a) * r0, cy + sin(a) * r0, cx + cos(a) * (r0 + len), cy + sin(a) * (r0 + len), stroke)
+        }
+    }
+
+    // ===== ⑤ touch ripples =====
+    private fun drawRipples(c: Canvas, nowMs: Long) {
+        val it = ripples.iterator()
+        while (it.hasNext()) {
+            val r = it.next(); val age = (nowMs - r.t0) / 700f
+            if (age >= 1f) { it.remove(); continue }
+            val e = ease(age)
+            for (k in 0 until 2) {
+                val q = (e - k * 0.15f).coerceIn(0f, 1f)
+                stroke.strokeWidth = 3f; stroke.color = cyan((220 * (1 - q)).toInt())
+                c.drawCircle(r.x, r.y, unit * (0.6f + 4f * q), stroke)
+            }
+            val b = unit * (1.6f - 0.8f * e)
+            stroke.strokeWidth = 3f; stroke.color = cyan((255 * (1 - age)).toInt())
+            for ((sx, sy) in listOf(-1f to -1f, 1f to -1f, -1f to 1f, 1f to 1f)) {
+                val x = r.x + sx * b; val y = r.y + sy * b
+                c.drawLine(x, y, x - sx * b * 0.45f, y, stroke); c.drawLine(x, y, x, y - sy * b * 0.45f, stroke)
+            }
+            mono.textAlign = Paint.Align.LEFT; mono.textSize = unit * 0.32f; mono.color = cyan((200 * (1 - age)).toInt())
+            c.drawText(String.format(Locale.US, "X%04d Y%04d", r.x.toInt(), r.y.toInt()), r.x + b * 1.1f, r.y - b * 1.1f, mono)
+            mono.color = CYAN
+        }
+    }
+
+    // ===== ⑫ incoming notification streaks =====
+    private fun drawIncoming(c: Canvas, nowMs: Long) {
+        val age = (nowMs - incomingAt) / 650f
+        if (age < 0f || age > 1.2f) return
+        val rnd = Random(incomingAt)
+        repeat(10) {
+            val ang = rnd.nextFloat() * 2 * PI.toFloat()
+            val d0 = hypot(width.toFloat(), height.toFloat()) * 0.7f
+            val delay = rnd.nextFloat() * 0.3f
+            val q = ((age - delay) / 0.7f).coerceIn(0f, 1f)
+            if (q <= 0f || q >= 1f) return@repeat
+            val head = d0 * (1 - ease(q)); val tail = d0 * (1 - ease((q - 0.25f).coerceAtLeast(0f)))
+            val hx = cx + cos(ang) * head; val hy = cy + sin(ang) * head
+            val txp = cx + cos(ang) * tail; val typ = cy + sin(ang) * tail
+            glow.strokeWidth = 10f; glow.color = cyan(180); c.drawLine(txp, typ, hx, hy, glow)
+            stroke.strokeWidth = 3f; stroke.color = Color.WHITE; c.drawLine(txp, typ, hx, hy, stroke)
+        }
+        if (age > 0.7f) {
+            val q = ((age - 0.7f) / 0.5f).coerceIn(0f, 1f)
+            glow.strokeWidth = 20f; glow.color = cyan((255 * (1 - q)).toInt()); c.drawCircle(cx, cy, coreR * (0.5f + q), glow)
+        }
+    }
+
+    // ===== ⑥ expanded panel =====
+    private fun expand(name: String) { expanded = name; expandAt = System.currentTimeMillis(); collapsing = false; invalidate() }
+    private fun collapse() { collapsing = true; expandAt = System.currentTimeMillis(); invalidate() }
+
+    private fun drawExpanded(c: Canvas, t: Float, now: Calendar, nowMs: Long) {
+        val name = expanded ?: return
+        val src = panels[name] ?: run { expanded = null; return }
+        var p = ((nowMs - expandAt) / 380f).coerceIn(0f, 1f)
+        if (collapsing) { p = 1f - p; if (p <= 0f) { expanded = null; collapsing = false; return } }
+        val e = ease(p)
+        val m = unit * 0.8f
+        val dst = RectF(m, topStrip.bottom + unit * 0.8f, width - m, height - insetBottom - unit * 0.8f)
+        expandRect.set(src.left + (dst.left - src.left) * e, src.top + (dst.top - src.top) * e,
+            src.right + (dst.right - src.right) * e, src.bottom + (dst.bottom - src.bottom) * e)
+        fill.color = Color.argb((200 * e).toInt(), 0, 4, 10); c.drawRect(0f, 0f, width.toFloat(), height.toFloat(), fill)
+        panelFrame(c, expandRect, name)
+        glow.strokeWidth = 14f; glow.color = cyan((150 * e).toInt()); c.drawRect(expandRect, glow)
+        if (p > 0.7f) {
+            val inner = RectF(expandRect.left, expandRect.top, expandRect.right, expandRect.bottom - unit * 3f)
+            c.save(); c.clipRect(expandRect)
+            val savedUnit = unit
+            unit = savedUnit * 1.35f
+            drawPanelContent(c, name, inner, t, now)
+            unit = savedUnit
+            c.restore()
+            // footer: open + close
+            val fh = unit * 1.9f
+            expandOpenBtn.set(expandRect.right - unit * 9f, expandRect.bottom - unit * 0.6f - fh, expandRect.right - unit * 0.6f, expandRect.bottom - unit * 0.6f)
+            fill.color = cyan(55); c.drawRect(expandOpenBtn, fill)
+            stroke.strokeWidth = 2.5f; stroke.color = CYAN; c.drawRect(expandOpenBtn, stroke)
+            label.textAlign = Paint.Align.CENTER; label.textSize = fh * 0.42f; label.letterSpacing = 0.25f; label.color = CYAN
+            c.drawText("OPEN  ▸", expandOpenBtn.centerX(), expandOpenBtn.centerY() + label.textSize * 0.36f, label)
+            label.textAlign = Paint.Align.LEFT; label.textSize = fh * 0.36f; label.color = cyan(140)
+            c.drawText("◂  TAP ANYWHERE TO CLOSE", expandRect.left + unit * 0.8f, expandOpenBtn.centerY() + label.textSize * 0.36f, label)
+            label.letterSpacing = 0f; label.color = CYAN
+        }
+    }
+
+    // ===== ⑦ boot log =====
+    private val bootLines = listOf("INITIALIZING HUD//OS", "CORE REACTOR ........ OK", "SENSOR ARRAY ........ OK", "HOLO PROJECTOR ...... OK",
+        "NETWORK LINK ........ OK", "VOICE INTERFACE ..... OK", "ALL SYSTEMS ONLINE")
+
+    private fun drawBootLog(c: Canvas, nowMs: Long) {
+        val age = nowMs - bootStart
+        if (age > 2200) return
+        val fade = if (age > 1700) 1f - (age - 1700) / 500f else 1f
+        mono.textAlign = Paint.Align.LEFT; mono.textSize = unit * 0.45f
+        val x = unit * 1.2f; var y = height - insetBottom - unit * 1.5f - bootLines.size * mono.textSize * 1.4f
+        for ((i, line) in bootLines.withIndex()) {
+            val lt = age - i * 160L
+            if (lt < 0) break
+            val chars = (lt / 12).toInt().coerceAtMost(line.length)
+            mono.color = if (i == bootLines.lastIndex) cyan((255 * fade).toInt()) else cyan((190 * fade).toInt())
+            fill.color = Color.argb((160 * fade).toInt(), 0, 6, 14)
+            c.drawRect(x - 6, y - mono.textSize, x + mono.measureText(line) + 6, y + mono.textSize * 0.35f, fill)
+            c.drawText(line.substring(0, chars) + if (chars < line.length) "▌" else "", x, y, mono)
+            y += mono.textSize * 1.4f
+        }
+        mono.color = CYAN
     }
 
     private val polySrc = FloatArray(8)
@@ -667,6 +950,17 @@ class HudView(context: Context) : View(context), SensorEventListener {
             c.drawCircle(cx + hr * cos(a).toFloat(), cy + hr * sin(a).toFloat(), unit * 0.1f, fill)
         }
 
+        drawGlobe(c, hr * 0.8f, t)
+        // ③ voice pulse
+        if (speakEnv > 0.02f) {
+            for (k in 0 until 3) {
+                val q = speakEnv * (1f - k * 0.25f)
+                glow.strokeWidth = 18f; glow.color = cyan((200 * q).toInt()); c.drawPath(hexPath(hr * (1f + 0.12f * q + k * 0.08f), t * 6f), glow)
+            }
+            fill.color = Color.WHITE
+            fill.shader = RadialGradient(cx, cy, hr, intArrayOf(cyan((120 * speakEnv).toInt()), cyan(0)), null, Shader.TileMode.CLAMP)
+            c.drawCircle(cx, cy, hr, fill); fill.shader = null
+        }
         val hm = String.format(Locale.US, "%02d:%02d", now.get(Calendar.HOUR_OF_DAY), now.get(Calendar.MINUTE))
         val big = coreR * 0.27f
         thin.textSize = big; textGlow.textSize = big
@@ -798,9 +1092,13 @@ class HudView(context: Context) : View(context), SensorEventListener {
         val fs = min(unit * 0.62f, b.height() / 10f)
         val bigS = fs * 3.2f
         val col = if (s.battery <= 20 && !s.charging) RED else CYAN
-        val w = bigNum(c, "${dBatt.roundToInt()}", b.left, b.top + bigS * 0.85f, bigS, col)
+        // liquid energy cell
+        val cellW = bigS * 0.62f; val cellH = bigS * 0.95f
+        val cell = RectF(b.left, b.top + fs * 0.1f, b.left + cellW, b.top + fs * 0.1f + cellH)
+        liquidCell(c, cell, dBatt / 100f, col, t)
+        val w = bigNum(c, "${dBatt.roundToInt()}", cell.right + fs * 0.5f, b.top + bigS * 0.85f, bigS, col)
         mono.textAlign = Paint.Align.LEFT; mono.textSize = fs * 1.2f; mono.color = col
-        c.drawText("%", b.left + w + fs * 0.2f, b.top + bigS * 0.85f, mono); mono.color = CYAN
+        c.drawText("%", cell.right + fs * 0.5f + w + fs * 0.2f, b.top + bigS * 0.85f, mono); mono.color = CYAN
         label.textAlign = Paint.Align.RIGHT; label.textSize = fs * 0.8f; label.letterSpacing = 0.15f
         val blink = (t * 2).toInt() % 2 == 0
         label.color = if (s.charging) (if (blink) CYAN else cyan(120)) else cyan(160)
@@ -816,6 +1114,39 @@ class HudView(context: Context) : View(context), SensorEventListener {
             graph(c, g, s.battHist, col, t)
             caption(c, g, "BATTERY LEVEL / 2 H", fs * 0.7f)
         }
+    }
+
+    private fun liquidCell(c: Canvas, r: RectF, level: Float, col: Int, t: Float) {
+        val rr = r.width() * 0.25f
+        c.save()
+        val clip = Path().apply { addRoundRect(r, rr, rr, Path.Direction.CW) }
+        c.clipPath(clip)
+        fill.color = Color.argb(120, 0, 20, 34); c.drawRect(r, fill)
+        val surface = r.bottom - r.height() * level.coerceIn(0f, 1f)
+        for (layer in 0 until 2) {
+            val p = Path(); p.moveTo(r.left, r.bottom)
+            var x = r.left
+            while (x <= r.right + 2) {
+                val y = surface + sin(x / r.width() * 6.3f + t * (2.4f + layer) + layer * 2f) * r.height() * 0.035f
+                p.lineTo(x, y); x += 3f
+            }
+            p.lineTo(r.right, r.bottom); p.close()
+            fill.color = Color.WHITE
+            fill.shader = LinearGradient(0f, surface, 0f, r.bottom, withA(col, if (layer == 0) 120 else 220), withA(col, if (layer == 0) 40 else 90), Shader.TileMode.CLAMP)
+            c.drawPath(p, fill); fill.shader = null
+        }
+        // bubbles
+        val rnd = Random(5)
+        repeat(6) {
+            val bx = r.left + rnd.nextFloat() * r.width()
+            val by = r.bottom - ((t * (0.15f + rnd.nextFloat() * 0.2f) + rnd.nextFloat()) % 1f) * (r.bottom - surface)
+            fill.color = Color.argb(150, 255, 255, 255); c.drawCircle(bx, by, 2.5f, fill)
+        }
+        c.restore()
+        glow.strokeWidth = 8f; glow.color = withA(col, 110); c.drawRoundRect(r, rr, rr, glow)
+        stroke.strokeWidth = 2.5f; stroke.color = col; c.drawRoundRect(r, rr, rr, stroke)
+        fill.color = col; c.drawRect(r.centerX() - r.width() * 0.22f, r.top - r.width() * 0.12f, r.centerX() + r.width() * 0.22f, r.top, fill)
+        for (k in 1..3) { stroke.strokeWidth = 1f; stroke.color = cyan(70); val y = r.top + r.height() * k / 4; c.drawLine(r.left, y, r.left + r.width() * 0.2f, y, stroke) }
     }
 
     private fun drawCalendar(c: Canvas, r: RectF, now: Calendar) {
@@ -1096,7 +1427,24 @@ class HudView(context: Context) : View(context), SensorEventListener {
     }
 
     // ======================= INPUT =======================
-    override fun onTouchEvent(e: MotionEvent): Boolean = gestures.onTouchEvent(e)
+    override fun onTouchEvent(e: MotionEvent): Boolean {
+        val wasIdle = idleP > 0.3f
+        if (e.action == MotionEvent.ACTION_DOWN) { lastTouch = System.currentTimeMillis(); listener?.onUserActivity(); invalidate() }
+        if (wasIdle) {
+            if (e.action == MotionEvent.ACTION_UP) { SoundFx.play(SoundFx.Fx.TAP); bootStart = System.currentTimeMillis() - 300 }
+            return true
+        }
+        if (expanded != null) {
+            if (e.action == MotionEvent.ACTION_UP && !collapsing) {
+                val name = expanded!!
+                if (expandOpenBtn.contains(e.x, e.y)) { SoundFx.play(SoundFx.Fx.OPEN); listener?.onPanelTap(name); collapse() }
+                else if (name == "MEDIA" && media != null && mediaBtns.entries.firstOrNull { it.value.contains(e.x, e.y) }?.let { SoundFx.play(SoundFx.Fx.TAP); listener?.onMediaAction(it.key); true } == true) { }
+                else { SoundFx.play(SoundFx.Fx.BACK); collapse() }
+            }
+            return true
+        }
+        return gestures.onTouchEvent(e)
+    }
 
     private fun segmentAt(x0: Float, y0: Float): Seg? {
         val x = x0 - dX * 0.8f; val y = y0 - dY * 0.8f
@@ -1129,7 +1477,11 @@ class HudView(context: Context) : View(context), SensorEventListener {
             return
         }
         if (hypot(x - cx - dX * 0.3f, y - cy - dY * 0.3f) < coreR * 0.55f) { SoundFx.play(SoundFx.Fx.LISTEN); listener?.onClockTap(); return }
-        for ((name, r) in panels) if (r.contains(x, y)) { SoundFx.play(SoundFx.Fx.TAP); listener?.onPanelTap(name); return }
+        for ((name, r) in panels) if (r.contains(x, y)) {
+            if (name == "MODULE") return
+            SoundFx.play(SoundFx.Fx.OPEN); expand(name); return
+        }
+        ripples += Ripple(x, y, System.currentTimeMillis()); SoundFx.play(SoundFx.Fx.TAP); invalidate()
     }
 
     private fun longPress(x: Float, y: Float) {
