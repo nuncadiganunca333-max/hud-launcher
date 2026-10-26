@@ -1494,6 +1494,7 @@ $notifs
             "SYSTEM" -> safeStart(Intent(Settings.ACTION_INTERNAL_STORAGE_SETTINGS))
             "CALENDAR" -> safeStart(Intent.makeMainSelectorActivity(Intent.ACTION_MAIN, Intent.CATEGORY_APP_CALENDAR))
             "NETWORK" -> safeStart(Intent(Settings.ACTION_WIFI_SETTINGS))
+            "MEDIA" -> if (controller != null) onMediaAction("open") else safeStart(Intent.makeMainSelectorActivity(Intent.ACTION_MAIN, Intent.CATEGORY_APP_MUSIC))
         }
     }
 

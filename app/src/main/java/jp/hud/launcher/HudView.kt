@@ -414,7 +414,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
 
         // panels: reveal from center (and retract in idle)
         val pb = ease((boot - 0.25f) / 0.75f) * (1f - ease(idleP))
-        val pa = if (expanded != null) 0.25f else pb
+        val pa = if (expanded != null) 0f else pb
         if (abs(pa - lastPanelsAlpha) > 0.02f || (pa == 1f && lastPanelsAlpha != 1f) || (pa == 0f && lastPanelsAlpha != 0f)) {
             lastPanelsAlpha = pa; listener?.onPanelsAlpha(pa)
         }
