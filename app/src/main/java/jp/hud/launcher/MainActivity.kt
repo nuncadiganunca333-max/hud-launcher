@@ -147,7 +147,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
         checkCarConnected()
         checkTalkIntent(intent)
         if (talkRequested) { talkRequested = false; intent = Intent(this, MainActivity::class.java); handler.postDelayed({ startAssistant() }, 250) }
-        else startWake(1200)
+        else { wakeDeadline = System.currentTimeMillis() + WAKE_WINDOW_MS + 600; startWake(600) }
         NotifService.sink = { onNotif(it, live = true) }
         startMedia()
         // ホーム以外にいた間に届いた通知（10分以内）
@@ -568,7 +568,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
             val t = tts ?: return@OnInitListener
             t.language = Locale.JAPAN
             prefs.getString("ttsVoice", null)?.let { name -> t.voices?.firstOrNull { it.name == name }?.let { t.voice = it } }
-            t.setPitch(prefs.getFloat("ttsPitch", 0.88f))
+            t.setPitch(prefs.getFloat("ttsPitch2", 0.8f))
             t.setSpeechRate(prefs.getFloat("ttsRate", 0.98f))
             t.setOnUtteranceProgressListener(object : android.speech.tts.UtteranceProgressListener() {
                 override fun onStart(id: String?) {}
@@ -581,6 +581,8 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
         tts = if (engine != null) TextToSpeech(this, listener, engine) else TextToSpeech(this, listener)
     }
 
+    private fun voiceStyle() = prefs.getInt("voiceStyle", 1)
+
     private fun sample() = "お呼びでしょうか、${callName()}。本日もすべてのシステムは正常です。"
 
     /** 読み上げ。エフェクトONなら一度ファイルに合成して残響をかけて再生 */
@@ -590,14 +592,21 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
         stopSpeech()
         stopWake()
         hud.speaking = true
-        if (prefs.getBoolean("ttsFx", true)) {
+        if ((voiceStyle() > 0)) {
             val f = java.io.File(cacheDir, "tts_out.wav")
             t.synthesizeToFile(text, null, f, "fx:$id")
         } else t.speak(text, TextToSpeech.QUEUE_FLUSH, null, id)
     }
 
     private fun utteranceDone(id: String) {
-        if (id.startsWith("fx:")) playWithFx(java.io.File(cacheDir, "tts_out.wav"), id.removePrefix("fx:"))
+        if (id.startsWith("fx:")) {
+            val raw = java.io.File(cacheDir, "tts_out.wav"); val proc = java.io.File(cacheDir, "tts_fx.wav")
+            val style = voiceStyle()
+            thread {
+                val ok = VoiceFx.process(raw, proc, style)
+                runOnUiThread { playWithFx(if (ok) proc else raw, id.removePrefix("fx:")) }
+            }
+        }
         else onSpoken(id)
     }
 
@@ -662,12 +671,12 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
             box.addView(tv); box.addView(sb)
             return sb
         }
-        val pitch = bar("声の高さ（低いほど落ち着いた声）", "ttsPitch", 0.88f)
+        val pitch = bar("声の高さ（低いほど落ち着いた声）", "ttsPitch2", 0.8f)
         val rate = bar("話す速さ", "ttsRate", 0.98f)
         AlertDialog.Builder(this).setTitle("声の高さ・速さ").setView(box)
             .setPositiveButton("保存") { _, _ ->
                 val p = 0.5f + pitch.progress / 100f; val r = 0.5f + rate.progress / 100f
-                prefs.edit().putFloat("ttsPitch", p).putFloat("ttsRate", r).apply()
+                prefs.edit().putFloat("ttsPitch2", p).putFloat("ttsRate", r).apply()
                 tts?.setPitch(p); tts?.setSpeechRate(r); speakOut(sample(), "preview")
             }
             .setNeutralButton("試聴") { _, _ ->
@@ -693,15 +702,18 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
     override fun onCoreLongPress() {
         AlertDialog.Builder(this).setTitle("HUD 設定")
             .setItems(arrayOf("Claude APIキーを設定", "呼び名を変更（いま：${callName()}）", "声を選ぶ", "声の高さ・速さ",
-                "声のエフェクト（残響）：${if (prefs.getBoolean("ttsFx", true)) "ON" else "OFF"}", "読み上げエンジンを切り替え",
+                "声の加工：${arrayOf("ナチュラル", "AIボイス", "AIボイス強め")[voiceStyle()]}", "読み上げエンジンを切り替え",
                 "会話をリセット", "アラーム一覧を開く", "ホームアプリを切り替え",
                 "画面の常時点灯：${arrayOf("常に", "充電中のみ", "OFF")[prefs.getInt("screenOn", 0)]}",
                 "アシスタントの名前（いま：${aiName()}）",
-                "呼びかけ起動：${arrayOf("ホーム表示中", "充電中・ドライブ中", "OFF")[prefs.getInt("wakeMode", 1)]}",
+                "呼びかけ起動：${arrayOf("開いて10秒", "10秒＋充電・運転中", "OFF")[prefs.getInt("wakeMode2", 0)]}",
                 "ドライブモードの車を設定", "ドライブモードを試す")) { _, w ->
                 when (w) {
                     0 -> askApiKey(); 1 -> askName(); 2 -> pickVoice(); 3 -> tuneVoice()
-                    4 -> { val v = !prefs.getBoolean("ttsFx", true); prefs.edit().putBoolean("ttsFx", v).apply(); speakOut(sample(), "preview") }
+                    4 -> AlertDialog.Builder(this).setTitle("声の加工")
+                        .setSingleChoiceItems(arrayOf("ナチュラル（加工なし）", "AIボイス（低音＋金属的な響き＋残響）", "AIボイス・強め"), voiceStyle()) { d, which ->
+                            prefs.edit().putInt("voiceStyle", which).apply(); d.dismiss(); speakOut(sample(), "preview")
+                        }.show()
                     5 -> pickEngine()
                     6 -> { agent.reset(); toast("会話をリセットしました") }
                     7 -> safeStart(Intent(AlarmClock.ACTION_SHOW_ALARMS)); 8 -> onHomeSettings()
@@ -711,8 +723,8 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
                         }.show()
                     10 -> askAiName()
                     11 -> AlertDialog.Builder(this).setTitle("「${aiName()}」の呼びかけで起動")
-                        .setSingleChoiceItems(arrayOf("ホーム表示中はいつでも", "充電中・ドライブ中のみ（電池にやさしい）", "OFF（タップだけ）"), prefs.getInt("wakeMode", 1)) { d, which ->
-                            prefs.edit().putInt("wakeMode", which).apply(); updateTalkHint(); stopWake(); startWake(500); d.dismiss()
+                        .setSingleChoiceItems(arrayOf("ホームを開いてから10秒間だけ", "10秒間＋充電中・ドライブ中は常に", "OFF（地球儀タップだけ）"), prefs.getInt("wakeMode2", 0)) { d, which ->
+                            prefs.edit().putInt("wakeMode2", which).apply(); updateTalkHint(); stopWake(); startWake(500); d.dismiss()
                         }.show()
                     12 -> pickCar()
                     13 -> { driveDismissed = false; enterDrive("TEST") }
@@ -769,19 +781,29 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
     }
 
     private var wakeRec: android.speech.SpeechRecognizer? = null
+    private var wakeDeadline = 0L
+    private val WAKE_WINDOW_MS = 10_000L
     private var wakeActive = false
     private var resumed = false
 
     private fun wakeAllowed(): Boolean {
-        val mode = prefs.getInt("wakeMode", 1)
-        return resumed && mode != 2 && (mode == 0 || hud.stats.charging || drive.isShowing) &&
+        val mode = prefs.getInt("wakeMode2", 0)
+        val always = mode == 1 && (hud.stats.charging || drive.isShowing)
+        return resumed && mode != 2 && (System.currentTimeMillis() < wakeDeadline || always) &&
             checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED &&
             !assistant.isShowing && !alert.listening && fxPlayer == null && apiKey().isNotEmpty()
     }
 
     private fun updateTalkHint() {
-        val m = prefs.getInt("wakeMode", 1)
-        hud.talkHint = if (apiKey().isNotEmpty() && (m == 0 || (m == 1 && (hud.stats.charging || drive.isShowing)))) "SAY \"${aiTag()}\"  /  TAP" else "TAP TO TALK"
+        val m = prefs.getInt("wakeMode2", 0)
+        val left = ((wakeDeadline - System.currentTimeMillis()) / 1000).toInt()
+        val always = m == 1 && (hud.stats.charging || drive.isShowing)
+        hud.talkHint = when {
+            apiKey().isEmpty() || m == 2 -> "TAP GLOBE TO TALK"
+            always -> "SAY \"${aiTag()}\"  /  TAP GLOBE"
+            left >= 0 && wakeActive -> "SAY \"${aiTag()}\""
+            else -> "TAP GLOBE TO TALK"
+        }
     }
 
     private fun startWake(delay: Long = 300) {
@@ -1443,7 +1465,8 @@ $notifs
             hud.stats = s
             drive.stats = s
             hud.lowPower = !s.charging
-            if (tick % 5 == 0) updateTalkHint()
+            updateTalkHint()
+            if (wakeActive && !wakeAllowed()) stopWake()
             if (prefs.getInt("screenOn", 0) == 0 && !s.charging && !drive.isShowing && !assistant.isShowing &&
                 System.currentTimeMillis() - hud.lastTouchAt > 180_000) {
                 window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
