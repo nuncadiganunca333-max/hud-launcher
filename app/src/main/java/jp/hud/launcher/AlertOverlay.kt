@@ -52,6 +52,10 @@ class AlertOverlay(context: Context) : View(context) {
     init { visibility = GONE }
 
     val isShowing get() = item != null
+    var listening = false
+        set(v) { field = v; invalidate() }
+    var micLevel = 0f
+    fun iconSrc() = Rect(iconRect.left.toInt(), iconRect.top.toInt(), iconRect.right.toInt(), iconRect.bottom.toInt())
 
     fun show(n: NotifItem, waiting: Int) {
         item = n; queued = waiting; shownAt = System.currentTimeMillis()
@@ -156,6 +160,16 @@ class AlertOverlay(context: Context) : View(context) {
         label.textAlign = Paint.Align.CENTER; label.textSize = u * 0.8f; label.letterSpacing = 0.1f
         label.color = cyan((180 + 75 * sin(t * 4f)).toInt())
         c.drawText("アプリを起動しますか？", cx, qy, label)
+        if (listening) {
+            label.textSize = u * 0.52f; label.color = cyan(200)
+            c.drawText("◉ LISTENING ―「はい」で開く ／「いいえ」で閉じる", cx, qy + u * 0.95f, label)
+            val n = 20; val bw = u * 0.22f
+            for (k in 0 until n) {
+                val h = u * (0.1f + micLevel * 0.7f * (0.5f + 0.5f * sin(t * 12f + k)))
+                fill.color = cyan(200)
+                c.drawRect(cx - n * bw / 2 + k * bw + 2, qy - u * 1.6f - h, cx - n * bw / 2 + (k + 1) * bw - 2, qy - u * 1.6f, fill)
+            }
+        }
         label.letterSpacing = 0f; label.color = CYAN
 
         // buttons
@@ -189,8 +203,8 @@ class AlertOverlay(context: Context) : View(context) {
         val n = item ?: return false
         if (e.action == MotionEvent.ACTION_UP) {
             when {
-                openR.contains(e.x, e.y) -> listener?.onAlertOpen(n, iconRect.let { android.graphics.Rect(it.left.toInt(), it.top.toInt(), it.right.toInt(), it.bottom.toInt()) })
-                dismissR.contains(e.x, e.y) -> listener?.onAlertDismiss(n)
+                openR.contains(e.x, e.y) -> { SoundFx.play(SoundFx.Fx.OPEN); listener?.onAlertOpen(n, Rect(iconRect.left.toInt(), iconRect.top.toInt(), iconRect.right.toInt(), iconRect.bottom.toInt())) }
+                dismissR.contains(e.x, e.y) -> { SoundFx.play(SoundFx.Fx.BACK); listener?.onAlertDismiss(n) }
                 !panel.contains(e.x, e.y) -> listener?.onAlertDismiss(n)
             }
         }

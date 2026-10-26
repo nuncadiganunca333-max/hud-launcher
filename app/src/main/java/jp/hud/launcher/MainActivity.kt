@@ -72,9 +72,11 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
     private var ttsReady = false
     private val prefs by lazy { getSharedPreferences("hud", Context.MODE_PRIVATE) }
 
-    // 天気の地点（静岡市清水区付近）
-    private val LAT = 35.02
-    private val LON = 138.48
+    // 天気の地点（現在地が取れないときは静岡市清水区付近）
+    private var lat = 35.02
+    private var lon = 138.48
+    private var placeName = "SHIMIZU / SHIZUOKA"
+    private val REQ_LOC = 52
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -93,8 +95,16 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
         root.addView(assistant, FrameLayout.LayoutParams(-1, -1))
         drawer = buildDrawer()
         root.addView(drawer, FrameLayout.LayoutParams(-1, -1))
+        SoundFx.init(this)
         tts = TextToSpeech(this) { st ->
-            if (st == TextToSpeech.SUCCESS) { tts?.language = Locale.JAPAN; tts?.setSpeechRate(1.05f); ttsReady = true }
+            if (st == TextToSpeech.SUCCESS) {
+                tts?.language = Locale.JAPAN; tts?.setSpeechRate(1.05f); ttsReady = true
+                tts?.setOnUtteranceProgressListener(object : android.speech.tts.UtteranceProgressListener() {
+                    override fun onStart(id: String?) {}
+                    override fun onDone(id: String?) { runOnUiThread { onSpoken(id ?: "") } }
+                    @Deprecated("Deprecated in Java") override fun onError(id: String?) {}
+                })
+            }
         }
         setContentView(root)
 
@@ -117,6 +127,11 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
         if (!enabled && !prefs.getBoolean("askedNotif", false)) {
             prefs.edit().putBoolean("askedNotif", true).apply()
             askNotifAccess()
+        }
+        if (checkSelfPermission(android.Manifest.permission.ACCESS_COARSE_LOCATION) != android.content.pm.PackageManager.PERMISSION_GRANTED
+            && !prefs.getBoolean("askedLoc", false) && notifAccessEnabled()) {
+            prefs.edit().putBoolean("askedLoc", true).apply()
+            requestPermissions(arrayOf(android.Manifest.permission.ACCESS_COARSE_LOCATION), REQ_LOC)
         }
         NotifService.sink = { onNotif(it, live = true) }
         startMedia()
@@ -182,7 +197,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
         val n = alertQueue.firstOrNull() ?: run { alert.hide(); return }
         closeDrawer()
         alert.show(n, alertQueue.size - 1)
-        if (speak) say(n)
+        if (speak) { SoundFx.play(SoundFx.Fx.ALERT); handler.postDelayed({ if (alert.isShowing && alertQueue.firstOrNull()?.key == n.key) say(n) }, 700) }
     }
 
     private fun say(n: NotifItem) {
@@ -190,11 +205,56 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
         val am = getSystemService(AUDIO_SERVICE) as AudioManager
         if (am.ringerMode != AudioManager.RINGER_MODE_NORMAL) return
         val who = if (n.title.isNotEmpty() && n.title.length <= 20) "、${n.title}さんから" else ""
-        tts?.speak("${n.appLabel}${who}の通知です。開きますか？", TextToSpeech.QUEUE_FLUSH, null, n.key)
+        tts?.speak("${n.appLabel}${who}の通知です。開きますか？", TextToSpeech.QUEUE_FLUSH, null, "alert:" + n.key)
+    }
+
+    private fun onSpoken(id: String) {
+        if (id.startsWith("alert:")) {
+            val key = id.removePrefix("alert:")
+            val n = alertQueue.firstOrNull()
+            if (alert.isShowing && n != null && n.key == key) alertListen(n)
+        } else if (id == "assistant") {
+            // 続けて会話：返事が終わったら自動でマイクを開く
+            if (assistant.isShowing && assistant.state == AssistantOverlay.State.SPEAKING) { assistant.state = AssistantOverlay.State.IDLE; listen(auto = true) }
+        }
+    }
+
+    private val YES = listOf("はい", "うん", "開いて", "ひらいて", "開け", "オープン", "お願い", "おねがい", "見せて", "いいよ", "ok", "オッケー", "見る")
+    private val NO = listOf("いいえ", "いや", "いらない", "閉じて", "とじて", "あとで", "後で", "結構", "けっこう", "大丈夫", "やめ", "キャンセル", "no", "ノー")
+
+    private fun alertListen(n: NotifItem) {
+        if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) != android.content.pm.PackageManager.PERMISSION_GRANTED) return
+        if (!android.speech.SpeechRecognizer.isRecognitionAvailable(this)) return
+        recognizer?.destroy()
+        val r = android.speech.SpeechRecognizer.createSpeechRecognizer(this); recognizer = r
+        alert.listening = true
+        r.setRecognitionListener(object : android.speech.RecognitionListener {
+            override fun onReadyForSpeech(p: Bundle?) {}
+            override fun onBeginningOfSpeech() {}
+            override fun onRmsChanged(rms: Float) { alert.micLevel = ((rms + 2f) / 12f).coerceIn(0f, 1f) }
+            override fun onBufferReceived(b: ByteArray?) {}
+            override fun onEndOfSpeech() { alert.micLevel = 0f }
+            override fun onError(error: Int) { alert.listening = false }
+            override fun onPartialResults(b: Bundle?) {}
+            override fun onEvent(t: Int, b: Bundle?) {}
+            override fun onResults(b: Bundle?) {
+                alert.listening = false
+                val all = b?.getStringArrayList(android.speech.SpeechRecognizer.RESULTS_RECOGNITION)?.joinToString(" ")?.lowercase().orEmpty()
+                if (!alert.isShowing || alertQueue.firstOrNull()?.key != n.key) return
+                when {
+                    NO.any { all.contains(it) } -> { SoundFx.play(SoundFx.Fx.BACK); onAlertDismiss(n) }
+                    YES.any { all.contains(it) } -> { SoundFx.play(SoundFx.Fx.OPEN); onAlertOpen(n, alert.iconSrc()) }
+                }
+            }
+        })
+        r.startListening(Intent(android.speech.RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+            .putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE_MODEL, android.speech.RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            .putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE, "ja-JP")
+            .putExtra(android.speech.RecognizerIntent.EXTRA_MAX_RESULTS, 3))
     }
 
     override fun onAlertOpen(item: NotifItem, src: android.graphics.Rect?) {
-        tts?.stop()
+        tts?.stop(); if (alert.listening) { recognizer?.cancel(); alert.listening = false }
         alertQueue.removeAll { it.key == item.key }
         alert.hide()
         var ok = false
@@ -213,7 +273,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
     }
 
     override fun onAlertDismiss(item: NotifItem) {
-        tts?.stop()
+        tts?.stop(); if (alert.listening) { recognizer?.cancel(); alert.listening = false }
         alertQueue.removeAll { it.key == item.key }
         showNext(speak = false)
     }
@@ -442,13 +502,14 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQ_LOC) { lastWeather = 0; fetchWeather(); return }
         if (requestCode == REQ_MIC) {
             if (grantResults.firstOrNull() == android.content.pm.PackageManager.PERMISSION_GRANTED) startAssistant()
             else toast("マイクの許可がないと話しかけられません")
         }
     }
 
-    private fun listen() {
+    private fun listen(auto: Boolean = false) {
         tts?.stop()
         if (!android.speech.SpeechRecognizer.isRecognitionAvailable(this)) {
             assistant.state = AssistantOverlay.State.ERROR; assistant.reply = "この端末では音声認識が使えないようです"; return
@@ -458,7 +519,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
         recognizer = r
         assistant.heard = ""; assistant.reply = ""; assistant.level = 0f
         assistant.state = AssistantOverlay.State.LISTENING
-        playBeep()
+        SoundFx.play(SoundFx.Fx.LISTEN)
         r.setRecognitionListener(object : android.speech.RecognitionListener {
             override fun onReadyForSpeech(p: Bundle?) {}
             override fun onBeginningOfSpeech() {}
@@ -469,8 +530,9 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
                 assistant.level = 0f
                 if (assistant.state == AssistantOverlay.State.LISTENING) {
                     assistant.state = AssistantOverlay.State.IDLE
-                    assistant.reply = if (error == android.speech.SpeechRecognizer.ERROR_NO_MATCH || error == android.speech.SpeechRecognizer.ERROR_SPEECH_TIMEOUT)
-                        "聞き取れませんでした。マイクをタップしてもう一度どうぞ。" else "音声認識エラー（$error）"
+                    val quiet = error == android.speech.SpeechRecognizer.ERROR_NO_MATCH || error == android.speech.SpeechRecognizer.ERROR_SPEECH_TIMEOUT
+                    if (auto && quiet) { SoundFx.play(SoundFx.Fx.DONE); assistant.reply = "ほかにご用があれば、マイクをタップしてください。" }
+                    else assistant.reply = if (quiet) "聞き取れませんでした。マイクをタップしてもう一度どうぞ。" else "音声認識エラー（$error）"
                 }
             }
             override fun onResults(b: Bundle?) {
@@ -510,7 +572,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
 【現在の状況】
 日時：$now
 バッテリー：${s.battery}%（${if (s.charging) "充電中" else "放電中"}）、端末温度 ${s.battTemp}℃
-天気（静岡市清水区）：${s.weather}、気温 ${s.temp ?: "不明"}℃、湿度 ${s.humidity}%、風速 ${s.wind}m/s
+天気（${placeName}）：${s.weather}、気温 ${s.temp ?: "不明"}℃、湿度 ${s.humidity}%、風速 ${s.wind}m/s
 予報：${s.forecast.joinToString("／")}
 再生中：$media
 最近の通知：
@@ -529,8 +591,10 @@ $notifs
             runOnUiThread {
                 if (!assistant.isShowing) return@runOnUiThread
                 if (out.startsWith("ERR:")) {
+                    SoundFx.play(SoundFx.Fx.ERROR)
                     assistant.state = AssistantOverlay.State.ERROR; assistant.reply = out.removePrefix("ERR:")
                 } else {
+                    SoundFx.play(SoundFx.Fx.DONE, haptic = false)
                     assistant.state = AssistantOverlay.State.SPEAKING; assistant.reply = out
                     speakReply(out)
                 }
@@ -540,11 +604,6 @@ $notifs
 
     private fun speakReply(text: String) {
         if (!ttsReady) { assistant.state = AssistantOverlay.State.IDLE; return }
-        tts?.setOnUtteranceProgressListener(object : android.speech.tts.UtteranceProgressListener() {
-            override fun onStart(id: String?) {}
-            override fun onDone(id: String?) { runOnUiThread { if (assistant.isShowing && assistant.state == AssistantOverlay.State.SPEAKING) assistant.state = AssistantOverlay.State.IDLE } }
-            @Deprecated("Deprecated in Java") override fun onError(id: String?) {}
-        })
         tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "assistant")
     }
 
@@ -607,9 +666,10 @@ $notifs
         }
     }
 
-    override fun onAssistantMic() { if (assistant.state != AssistantOverlay.State.LISTENING) listen() }
+    override fun onAssistantMic() { SoundFx.play(SoundFx.Fx.TAP); if (assistant.state != AssistantOverlay.State.LISTENING) listen() }
 
     override fun onAssistantClose() {
+        SoundFx.play(SoundFx.Fx.BACK)
         recognizer?.cancel(); tts?.stop()
         assistant.close()
     }
@@ -738,10 +798,12 @@ $notifs
                 }
             }
             setOnItemClickListener { _, v, p, _ ->
+                SoundFx.play(SoundFx.Fx.OPEN)
                 val loc = IntArray(2); v.getLocationInWindow(loc)
                 launch(filtered[p], android.graphics.Rect(loc[0], loc[1], loc[0] + v.width, loc[1] + v.height)); closeDrawer()
             }
             setOnItemLongClickListener { _, _, p, _ ->
+                SoundFx.play(SoundFx.Fx.DONE)
                 toggleDock(filtered[p]); (adapter as BaseAdapter).notifyDataSetChanged(); true
             }
         }
@@ -827,11 +889,53 @@ $notifs
         }
     }
 
+    private fun locate(then: () -> Unit) {
+        if (checkSelfPermission(android.Manifest.permission.ACCESS_COARSE_LOCATION) != android.content.pm.PackageManager.PERMISSION_GRANTED) { then(); return }
+        val lm = getSystemService(LOCATION_SERVICE) as android.location.LocationManager
+        val provider = when {
+            lm.isProviderEnabled(android.location.LocationManager.NETWORK_PROVIDER) -> android.location.LocationManager.NETWORK_PROVIDER
+            Build.VERSION.SDK_INT >= 31 && lm.isProviderEnabled(android.location.LocationManager.FUSED_PROVIDER) -> android.location.LocationManager.FUSED_PROVIDER
+            else -> null
+        }
+        if (provider == null) { then(); return }
+        var done = false
+        val finish = { loc: android.location.Location? ->
+            if (!done) {
+                done = true
+                if (loc != null) {
+                    lat = loc.latitude; lon = loc.longitude
+                    thread {
+                        try {
+                            @Suppress("DEPRECATION")
+                            val a = android.location.Geocoder(this, Locale.JAPAN).getFromLocation(lat, lon, 1)?.firstOrNull()
+                            if (a != null) {
+                                val city = a.locality ?: a.subAdminArea ?: ""
+                                val ward = a.subLocality ?: ""
+                                val name = listOf(a.adminArea ?: "", city + ward).filter { it.isNotEmpty() }.joinToString(" ")
+                                if (name.isNotEmpty()) runOnUiThread { placeName = name; hud.stats = hud.stats.copy(place = placeName) }
+                            }
+                        } catch (e: Exception) { }
+                    }
+                }
+                then()
+            }
+        }
+        try {
+            lm.getCurrentLocation(provider, null, mainExecutor) { finish(it ?: lm.getLastKnownLocation(provider)) }
+            handler.postDelayed({ finish(try { lm.getLastKnownLocation(provider) } catch (e: SecurityException) { null }) }, 10000)
+        } catch (e: SecurityException) { then() }
+    }
+
     private fun fetchWeather() {
+        lastWeather = System.currentTimeMillis()
+        locate { fetchWeatherAt() }
+    }
+
+    private fun fetchWeatherAt() {
         lastWeather = System.currentTimeMillis()
         thread {
             try {
-                val url = URL("https://api.open-meteo.com/v1/forecast?latitude=$LAT&longitude=$LON" +
+                val url = URL("https://api.open-meteo.com/v1/forecast?latitude=$lat&longitude=$lon" +
                         "&current=temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,wind_speed_10m&wind_speed_unit=ms" +
                         "&daily=weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset&timezone=Asia%2FTokyo&forecast_days=4&hourly=temperature_2m&forecast_hours=24")
                 val con = url.openConnection() as HttpURLConnection

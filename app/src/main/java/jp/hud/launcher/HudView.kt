@@ -37,6 +37,7 @@ data class Stats(
     var sunset: String = "--:--",
     var forecast: List<String> = emptyList(),
     var hourly: List<Float> = emptyList(),
+    var place: String = "SHIMIZU / SHIZUOKA",
 )
 
 data class MediaInfo(
@@ -113,6 +114,9 @@ class HudView(context: Context) : View(context), SensorEventListener {
     private val sensors = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
     private var gx = 0f; private var gy = 0f; private var bx = 0f; private var by = 0f
     private var px = 0f; private var py = 0f
+    private var dX = 0f; private var dY = 0f
+    private val camera = android.graphics.Camera()
+    private val m3d = Matrix()
 
     // ---- layout ----
     private var wide = true
@@ -154,7 +158,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
         override fun onSingleTapUp(e: MotionEvent): Boolean { tap(e.x, e.y); return true }
         override fun onLongPress(e: MotionEvent) { longPress(e.x, e.y) }
         override fun onFling(e1: MotionEvent?, e2: MotionEvent, vx: Float, vy: Float): Boolean {
-            if (vy < -1200 && abs(vy) > abs(vx)) { listener?.onOpenDrawer(); return true }
+            if (vy < -1200 && abs(vy) > abs(vx)) { SoundFx.play(SoundFx.Fx.OPEN); listener?.onOpenDrawer(); return true }
             return false
         }
     })
@@ -335,6 +339,8 @@ class HudView(context: Context) : View(context), SensorEventListener {
         val tx = ((gx - bx) * unit * 9f).coerceIn(-unit * 1.4f, unit * 1.4f)
         val ty = ((gy - by) * unit * 9f).coerceIn(-unit * 1.4f, unit * 1.4f)
         px += (tx - px) * 0.15f; py += (ty - py) * 0.15f
+        dX = px + sin(t * 0.45f) * unit * 0.55f
+        dY = py + cos(t * 0.37f) * unit * 0.4f
 
         // background (moves opposite)
         layerPaint.alpha = (255 * min(1f, boot * 2.5f)).toInt()
@@ -342,7 +348,9 @@ class HudView(context: Context) : View(context), SensorEventListener {
 
         // core (moves with tilt, boots by spinning in)
         c.save()
-        c.translate(px * 0.5f, py * 0.5f)
+        c.translate(dX * 0.5f, dY * 0.5f)
+        camera.save(); camera.rotateX(-dY / unit * 4f); camera.rotateY(dX / unit * 4f); camera.getMatrix(m3d); camera.restore()
+        m3d.preTranslate(-cx, -cy); m3d.postTranslate(cx, cy); c.concat(m3d)
         if (boot < 1f) {
             c.saveLayerAlpha(null, (255 * eb).toInt())
             c.scale(0.55f + 0.45f * eb, 0.55f + 0.45f * eb, cx, cy)
@@ -358,6 +366,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
             c.save()
             val half = width / 2f * pb
             c.clipRect(width / 2f - half, 0f, width / 2f + half, height.toFloat())
+            drawPanelDepth(c)
             c.drawBitmap(fg, 0f, 0f, null)
             drawTopStrip(c, t, now)
             panels["SYSTEM"]?.let { drawSystem(c, it, t) }
@@ -383,6 +392,18 @@ class HudView(context: Context) : View(context), SensorEventListener {
         c.drawRect(0f, sy - unit * 2, width.toFloat(), sy, fill); fill.shader = null
 
         if (running) { if (boot < 1f) postInvalidateOnAnimation() else postInvalidateDelayed(33) }
+    }
+
+    private fun drawPanelDepth(c: Canvas) {
+        val ex = -dX * 0.3f - unit * 0.15f; val ey = -dY * 0.3f + unit * 0.35f
+        for ((_, r) in panels) {
+            val b = RectF(r); b.offset(ex, ey)
+            fill.color = Color.argb(200, 0, 8, 16); c.drawRect(b, fill)
+            stroke.strokeWidth = 1.5f; stroke.color = cyan(55); c.drawRect(b, stroke)
+            stroke.color = cyan(80)
+            c.drawLine(r.left, r.top, b.left, b.top, stroke); c.drawLine(r.right, r.top, b.right, b.top, stroke)
+            c.drawLine(r.left, r.bottom, b.left, b.bottom, stroke); c.drawLine(r.right, r.bottom, b.right, b.bottom, stroke)
+        }
     }
 
     private fun sheens(c: Canvas, t: Float) {
@@ -455,7 +476,8 @@ class HudView(context: Context) : View(context), SensorEventListener {
     }
 
     private fun drawCore(c: Canvas, t: Float, now: Calendar) {
-        // static-ish decoration
+        // static-ish decoration (far layer)
+        c.save(); c.translate(dX * 0.6f, dY * 0.6f)
         ticks(c, coreR * 1.13f, 144, unit * 0.22f, cyan(120))
         stroke.strokeWidth = 2f; stroke.color = cyan(120); c.drawCircle(cx, cy, coreR * 1.02f, stroke)
         stroke.strokeWidth = 1.5f; stroke.color = cyan(60); c.drawCircle(cx, cy, coreR * 1.24f, stroke)
@@ -476,7 +498,9 @@ class HudView(context: Context) : View(context), SensorEventListener {
         mono.letterSpacing = 0f; mono.color = CYAN
         c.restore()
 
+        c.restore()
         // radar sweep
+        c.save(); c.translate(dX * 0.15f, dY * 0.15f)
         c.save(); c.rotate(t * 70f, cx, cy)
         stroke.color = Color.WHITE; stroke.shader = SweepGradient(cx, cy, intArrayOf(Color.TRANSPARENT, Color.TRANSPARENT, cyan(110)), floatArrayOf(0f, 0.75f, 1f))
         stroke.strokeWidth = coreR * 0.12f
@@ -485,7 +509,9 @@ class HudView(context: Context) : View(context), SensorEventListener {
         c.drawLine(cx + coreR * 0.655f, cy, cx + coreR * 0.775f, cy, stroke)
         c.restore()
 
+        c.restore()
         // segments
+        c.save(); c.translate(dX * 0.3f, dY * 0.3f)
         val segs = segments()
         val n = segs.size; val sw = 360f / n; val start = -90f - sw / 2
         val r1 = segR1; val r2 = segR2
@@ -519,13 +545,17 @@ class HudView(context: Context) : View(context), SensorEventListener {
             label.letterSpacing = 0f
         }
 
+        c.restore()
         // rotating outer accents
+        c.save(); c.translate(dX * 0.75f, dY * 0.75f)
         arcAt(c, coreR * 1.08f, 4f, t * 14f, 300f, cyan(55), false)
         for (k in 0 until 4) arcAt(c, coreR * 1.08f, 7f, t * 14f + k * 90f, 28f, CYAN, true)
         arcAt(c, coreR * 1.29f, 6f, 210f + sin(t * 0.6f) * 25f, 30f, RED, true)
         for (k in 0 until 10) arcAt(c, coreR * 1.33f, 3f, k * 36f - t * 5f, 14f, cyan(150), false)
 
+        c.restore()
         // dashed ring
+        c.save(); c.translate(dX * 0.15f, dY * 0.15f)
         c.save(); c.rotate(-t * 22f, cx, cy)
         dash.strokeWidth = 4f; dash.color = cyan(170); c.drawCircle(cx, cy, coreR * 0.64f, dash)
         c.restore()
@@ -541,8 +571,14 @@ class HudView(context: Context) : View(context), SensorEventListener {
             c.drawCircle(cx + cos(a) * coreR * 0.72f, cy + sin(a) * coreR * 0.72f, unit * 0.12f, fill)
         }
 
-        // layered hexagon core
+        c.restore()
+        // layered hexagon core (near layer, with shadow)
         val hr = coreR * 0.5f
+        c.save(); c.translate(dX * 0.35f + unit * 0.2f, dY * 0.35f + unit * 0.5f)
+        fill.color = Color.argb(150, 0, 0, 0); fill.maskFilter = BlurMaskFilter(unit * 0.8f, BlurMaskFilter.Blur.NORMAL)
+        c.drawPath(hexPath(hr, t * 6f), fill); fill.maskFilter = null
+        c.restore()
+        c.save(); c.translate(-dX * 0.2f, -dY * 0.2f)
         fill.color = Color.WHITE; fill.shader = RadialGradient(cx, cy, hr, intArrayOf(cyan(80), cyan(20), cyan(0)), floatArrayOf(0f, 0.7f, 1f), Shader.TileMode.CLAMP)
         c.drawPath(hexPath(hr, t * 6f), fill); fill.shader = null
         val pulse = (sin(t * 2.2f) + 1) / 2
@@ -569,6 +605,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
         c.drawText(arrayOf("SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY")[wd], cx, cy + big * 0.95f, label)
         label.textSize = coreR * 0.042f; label.letterSpacing = 0.3f; label.color = cyan((120 + 80 * sin(t * 2f)).toInt())
         c.drawText("TAP TO TALK", cx, cy + big * 1.38f, label)
+        c.restore()
         label.letterSpacing = 0f; label.color = CYAN; mono.color = CYAN
     }
 
@@ -751,7 +788,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
         val b = body(r); val s = stats
         val fs = min(unit * 0.6f, b.height() / (if (wide) 10f else 12f))
         label.textAlign = Paint.Align.LEFT; label.textSize = fs * 0.75f; label.color = cyan(160); label.letterSpacing = 0.15f
-        c.drawText("SHIMIZU / SHIZUOKA", b.left, b.top + fs * 0.8f, label); label.letterSpacing = 0f
+        c.drawText(s.place, b.left, b.top + fs * 0.8f, label); label.letterSpacing = 0f
         val bigS = fs * 3.3f
         val tt = if (s.temp != null) "${dTemp.roundToInt()}" else "--"
         val w = bigNum(c, tt, b.left, b.top + fs * 1.2f + bigS * 0.85f, bigS, CYAN)
@@ -986,7 +1023,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
     override fun onTouchEvent(e: MotionEvent): Boolean = gestures.onTouchEvent(e)
 
     private fun segmentAt(x0: Float, y0: Float): Seg? {
-        val x = x0 - px * 0.5f; val y = y0 - py * 0.5f
+        val x = x0 - dX * 0.8f; val y = y0 - dY * 0.8f
         val d = hypot(x - cx, y - cy)
         if (d < segR1 || d > segR2 * 1.05f) return null
         val segs = segments(); val n = segs.size; val sw = 360f / n
@@ -996,11 +1033,12 @@ class HudView(context: Context) : View(context), SensorEventListener {
     }
 
     private fun tap(x: Float, y: Float) {
-        if (y < topStrip.bottom + unit * 0.5f && x < width * 0.5f) { listener?.onTopStripTap(); return }
+        if (y < topStrip.bottom + unit * 0.5f && x < width * 0.5f) { SoundFx.play(SoundFx.Fx.TAP); listener?.onTopStripTap(); return }
         segmentAt(x, y)?.let { s ->
             when {
-                s.isApps || s.app == null -> listener?.onOpenDrawer()
+                s.isApps || s.app == null -> { SoundFx.play(SoundFx.Fx.OPEN); listener?.onOpenDrawer() }
                 else -> {
+                    SoundFx.play(SoundFx.Fx.OPEN)
                     val src = Rect((x - unit * 2).toInt(), (y - unit * 2).toInt(), (x + unit * 2).toInt(), (y + unit * 2).toInt())
                     flashLaunch(src, s.app.label)
                     listener?.onLaunch(s.app, src)
@@ -1010,18 +1048,18 @@ class HudView(context: Context) : View(context), SensorEventListener {
         }
         panels["MODULE"]?.let { if (it.contains(x, y)) { if (!moduleLinked) listener?.onModuleEdit(); return } }
         if (panels["MEDIA"]?.contains(x, y) == true && media != null) {
-            for ((k, r) in mediaBtns) if (r.contains(x, y)) { listener?.onMediaAction(k); return }
+            for ((k, r) in mediaBtns) if (r.contains(x, y)) { SoundFx.play(SoundFx.Fx.TAP); listener?.onMediaAction(k); return }
             if (mediaArt.contains(x, y)) { listener?.onMediaAction("open"); return }
             return
         }
-        if (hypot(x - cx - px * 0.5f, y - cy - py * 0.5f) < coreR * 0.55f) { listener?.onClockTap(); return }
-        for ((name, r) in panels) if (r.contains(x, y)) { listener?.onPanelTap(name); return }
+        if (hypot(x - cx - dX * 0.3f, y - cy - dY * 0.3f) < coreR * 0.55f) { SoundFx.play(SoundFx.Fx.LISTEN); listener?.onClockTap(); return }
+        for ((name, r) in panels) if (r.contains(x, y)) { SoundFx.play(SoundFx.Fx.TAP); listener?.onPanelTap(name); return }
     }
 
     private fun longPress(x: Float, y: Float) {
-        segmentAt(x, y)?.app?.let { listener?.onDockLongPress(it); return }
+        segmentAt(x, y)?.app?.let { SoundFx.play(SoundFx.Fx.DONE); listener?.onDockLongPress(it); return }
         panels["MODULE"]?.let { if (it.contains(x, y)) { listener?.onModuleEdit(); return } }
-        if (hypot(x - cx - px * 0.5f, y - cy - py * 0.5f) < coreR * 0.55f) { listener?.onCoreLongPress(); return }
+        if (hypot(x - cx - dX * 0.3f, y - cy - dY * 0.3f) < coreR * 0.55f) { SoundFx.play(SoundFx.Fx.TAP); listener?.onCoreLongPress(); return }
         if (y < topStrip.bottom + unit) listener?.onHomeSettings()
     }
 }
