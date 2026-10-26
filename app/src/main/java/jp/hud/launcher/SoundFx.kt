@@ -20,7 +20,7 @@ object SoundFx {
     private const val RATE = 22050
     private val cache = HashMap<Fx, ShortArray>()
     private var app: Context? = null
-    var enabled = true
+    var enabled = false
 
     fun init(ctx: Context) {
         app = ctx.applicationContext
