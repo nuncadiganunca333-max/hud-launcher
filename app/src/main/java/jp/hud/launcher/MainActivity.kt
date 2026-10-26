@@ -96,16 +96,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
         drawer = buildDrawer()
         root.addView(drawer, FrameLayout.LayoutParams(-1, -1))
         SoundFx.init(this)
-        tts = TextToSpeech(this) { st ->
-            if (st == TextToSpeech.SUCCESS) {
-                tts?.language = Locale.JAPAN; tts?.setSpeechRate(1.05f); ttsReady = true
-                tts?.setOnUtteranceProgressListener(object : android.speech.tts.UtteranceProgressListener() {
-                    override fun onStart(id: String?) {}
-                    override fun onDone(id: String?) { runOnUiThread { onSpoken(id ?: "") } }
-                    @Deprecated("Deprecated in Java") override fun onError(id: String?) {}
-                })
-            }
-        }
+        initTts()
         setContentView(root)
 
         root.setOnApplyWindowInsetsListener { v, ins ->
@@ -142,6 +133,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
     }
 
     override fun onDestroy() {
+        stopSpeech(); reverb?.release()
         tts?.shutdown()
         super.onDestroy()
     }
@@ -152,7 +144,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
         hud.stop()
         handler.removeCallbacks(statsLoop)
         NotifService.sink = null
-        tts?.stop()
+        stopSpeech()
         recognizer?.destroy(); recognizer = null
         assistant.close()
     }
@@ -205,7 +197,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
         val am = getSystemService(AUDIO_SERVICE) as AudioManager
         if (am.ringerMode != AudioManager.RINGER_MODE_NORMAL) return
         val who = if (n.title.isNotEmpty() && n.title.length <= 20) "、${n.title}さんから" else ""
-        tts?.speak("${n.appLabel}${who}の通知です。開きますか？", TextToSpeech.QUEUE_FLUSH, null, "alert:" + n.key)
+        speakOut("${n.appLabel}${who}の通知です。開きますか？", "alert:" + n.key)
     }
 
     private fun onSpoken(id: String) {
@@ -254,7 +246,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
     }
 
     override fun onAlertOpen(item: NotifItem, src: android.graphics.Rect?) {
-        tts?.stop(); if (alert.listening) { recognizer?.cancel(); alert.listening = false }
+        stopSpeech(); if (alert.listening) { recognizer?.cancel(); alert.listening = false }
         alertQueue.removeAll { it.key == item.key }
         alert.hide()
         var ok = false
@@ -273,7 +265,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
     }
 
     override fun onAlertDismiss(item: NotifItem) {
-        tts?.stop(); if (alert.listening) { recognizer?.cancel(); alert.listening = false }
+        stopSpeech(); if (alert.listening) { recognizer?.cancel(); alert.listening = false }
         alertQueue.removeAll { it.key == item.key }
         showNext(speak = false)
     }
@@ -455,15 +447,148 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
         }
     }
 
+    // ---------- voice (TTS) ----------
+    private var fxPlayer: android.media.MediaPlayer? = null
+    private var reverb: android.media.audiofx.PresetReverb? = null
+
+    private fun initTts() {
+        ttsReady = false
+        val engine = prefs.getString("ttsEngine", null)
+        val listener = TextToSpeech.OnInitListener { st ->
+            if (st != TextToSpeech.SUCCESS) return@OnInitListener
+            val t = tts ?: return@OnInitListener
+            t.language = Locale.JAPAN
+            prefs.getString("ttsVoice", null)?.let { name -> t.voices?.firstOrNull { it.name == name }?.let { t.voice = it } }
+            t.setPitch(prefs.getFloat("ttsPitch", 0.88f))
+            t.setSpeechRate(prefs.getFloat("ttsRate", 0.98f))
+            t.setOnUtteranceProgressListener(object : android.speech.tts.UtteranceProgressListener() {
+                override fun onStart(id: String?) {}
+                override fun onDone(id: String?) { runOnUiThread { utteranceDone(id ?: "") } }
+                @Deprecated("Deprecated in Java") override fun onError(id: String?) {}
+            })
+            ttsReady = true
+        }
+        tts?.shutdown()
+        tts = if (engine != null) TextToSpeech(this, listener, engine) else TextToSpeech(this, listener)
+    }
+
+    private fun sample() = "お呼びでしょうか、${callName()}。本日もすべてのシステムは正常です。"
+
+    /** 読み上げ。エフェクトONなら一度ファイルに合成して残響をかけて再生 */
+    private fun speakOut(text: String, id: String) {
+        val t = tts ?: return
+        if (!ttsReady) return
+        stopSpeech()
+        if (prefs.getBoolean("ttsFx", true)) {
+            val f = java.io.File(cacheDir, "tts_out.wav")
+            t.synthesizeToFile(text, null, f, "fx:$id")
+        } else t.speak(text, TextToSpeech.QUEUE_FLUSH, null, id)
+    }
+
+    private fun utteranceDone(id: String) {
+        if (id.startsWith("fx:")) playWithFx(java.io.File(cacheDir, "tts_out.wav"), id.removePrefix("fx:"))
+        else onSpoken(id)
+    }
+
+    private fun playWithFx(f: java.io.File, id: String) {
+        try {
+            fxPlayer?.release()
+            if (reverb == null) reverb = android.media.audiofx.PresetReverb(0, 0).apply {
+                preset = android.media.audiofx.PresetReverb.PRESET_LARGEROOM; enabled = true
+            }
+            val mp = android.media.MediaPlayer()
+            mp.setAudioAttributes(android.media.AudioAttributes.Builder().setUsage(android.media.AudioAttributes.USAGE_ASSISTANT)
+                .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH).build())
+            mp.setDataSource(f.path)
+            mp.prepare()
+            reverb?.let { mp.attachAuxEffect(it.id); mp.setAuxEffectSendLevel(0.32f) }
+            mp.setOnCompletionListener { it.release(); if (fxPlayer === it) fxPlayer = null; onSpoken(id) }
+            fxPlayer = mp
+            mp.start()
+        } catch (e: Exception) {
+            // エフェクトが使えない端末では普通に読み上げ
+            onSpoken(id)
+        }
+    }
+
+    private fun stopSpeech() {
+        tts?.stop()
+        fxPlayer?.let { try { it.stop() } catch (e: Exception) { }; it.release() }
+        fxPlayer = null
+    }
+
+    private fun pickVoice() {
+        val t = tts ?: return
+        val voices = (t.voices ?: emptySet()).filter { it.locale.language == "ja" }
+            .sortedWith(compareBy({ it.isNetworkConnectionRequired }, { -it.quality }, { it.name }))
+        if (voices.isEmpty()) { toast("日本語の声が見つかりません。エンジンを切り替えてみてください"); return }
+        val labels = voices.mapIndexed { i, v ->
+            val kind = if (v.name.contains("male", true) && !v.name.contains("female", true)) "男性系" else ""
+            "声 ${i + 1}  ${kind}${if (v.isNetworkConnectionRequired) "（高音質・要通信）" else ""}\n${v.name}"
+        }.toTypedArray()
+        var chosen = voices.indexOfFirst { it.name == t.voice?.name }.coerceAtLeast(0)
+        AlertDialog.Builder(this).setTitle("声を選ぶ（タップで試聴）")
+            .setSingleChoiceItems(labels, chosen) { _, w -> chosen = w; t.voice = voices[w]; speakOut(sample(), "preview") }
+            .setPositiveButton("決定") { _, _ -> prefs.edit().putString("ttsVoice", voices[chosen].name).apply(); toast("声を保存しました") }
+            .setNegativeButton("キャンセル") { _, _ ->
+                prefs.getString("ttsVoice", null)?.let { n -> t.voices?.firstOrNull { it.name == n }?.let { t.voice = it } }
+            }.show()
+    }
+
+    private fun tuneVoice() {
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(24), dp(12), dp(24), 0) }
+        fun bar(title: String, key: String, def: Float): SeekBar {
+            val tv = TextView(this).apply { textSize = 14f }
+            val sb = SeekBar(this).apply { max = 100; progress = (((prefs.getFloat(key, def) - 0.5f) / 1.0f) * 100).toInt() }
+            fun upd() { tv.text = String.format(Locale.US, "%s：%.2f", title, 0.5f + sb.progress / 100f) }
+            upd()
+            sb.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(s: SeekBar?, p: Int, u: Boolean) = upd()
+                override fun onStartTrackingTouch(s: SeekBar?) {}
+                override fun onStopTrackingTouch(s: SeekBar?) {}
+            })
+            box.addView(tv); box.addView(sb)
+            return sb
+        }
+        val pitch = bar("声の高さ（低いほど落ち着いた声）", "ttsPitch", 0.88f)
+        val rate = bar("話す速さ", "ttsRate", 0.98f)
+        AlertDialog.Builder(this).setTitle("声の高さ・速さ").setView(box)
+            .setPositiveButton("保存") { _, _ ->
+                val p = 0.5f + pitch.progress / 100f; val r = 0.5f + rate.progress / 100f
+                prefs.edit().putFloat("ttsPitch", p).putFloat("ttsRate", r).apply()
+                tts?.setPitch(p); tts?.setSpeechRate(r); speakOut(sample(), "preview")
+            }
+            .setNeutralButton("試聴") { _, _ ->
+                tts?.setPitch(0.5f + pitch.progress / 100f); tts?.setSpeechRate(0.5f + rate.progress / 100f); speakOut(sample(), "preview")
+                handler.postDelayed({ tuneVoice() }, 300)
+            }
+            .setNegativeButton("キャンセル", null).show()
+    }
+
+    private fun pickEngine() {
+        val engines = tts?.engines ?: emptyList()
+        if (engines.isEmpty()) { toast("読み上げエンジンが見つかりません"); return }
+        AlertDialog.Builder(this).setTitle("読み上げエンジン")
+            .setItems(engines.map { it.label }.toTypedArray()) { _, w ->
+                prefs.edit().putString("ttsEngine", engines[w].name).remove("ttsVoice").apply()
+                initTts(); toast("${engines[w].label} に切り替えました。「声を選ぶ」から声を選んでください")
+            }.show()
+    }
+
     // ---------- Claude assistant ----------
     private fun apiKey() = prefs.getString("apiKey", "") ?: ""
 
     override fun onCoreLongPress() {
         AlertDialog.Builder(this).setTitle("HUD 設定")
-            .setItems(arrayOf("Claude APIキーを設定", "呼び名を変更（いま：${callName()}）", "会話をリセット", "アラーム一覧を開く", "ホームアプリを切り替え")) { _, w ->
+            .setItems(arrayOf("Claude APIキーを設定", "呼び名を変更（いま：${callName()}）", "声を選ぶ", "声の高さ・速さ",
+                "声のエフェクト（残響）：${if (prefs.getBoolean("ttsFx", true)) "ON" else "OFF"}", "読み上げエンジンを切り替え",
+                "会話をリセット", "アラーム一覧を開く", "ホームアプリを切り替え")) { _, w ->
                 when (w) {
-                    0 -> askApiKey(); 1 -> askName(); 2 -> { agent.reset(); toast("会話をリセットしました") }
-                    3 -> safeStart(Intent(AlarmClock.ACTION_SHOW_ALARMS)); 4 -> onHomeSettings()
+                    0 -> askApiKey(); 1 -> askName(); 2 -> pickVoice(); 3 -> tuneVoice()
+                    4 -> { val v = !prefs.getBoolean("ttsFx", true); prefs.edit().putBoolean("ttsFx", v).apply(); speakOut(sample(), "preview") }
+                    5 -> pickEngine()
+                    6 -> { agent.reset(); toast("会話をリセットしました") }
+                    7 -> safeStart(Intent(AlarmClock.ACTION_SHOW_ALARMS)); 8 -> onHomeSettings()
                 }
             }.show()
     }
@@ -511,7 +636,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
     }
 
     private fun listen(auto: Boolean = false) {
-        tts?.stop()
+        stopSpeech()
         if (!android.speech.SpeechRecognizer.isRecognitionAvailable(this)) {
             assistant.state = AssistantOverlay.State.ERROR; assistant.reply = "この端末では音声認識が使えないようです"; return
         }
@@ -605,7 +730,7 @@ $notifs
 
     private fun speakReply(text: String) {
         if (!ttsReady) { assistant.state = AssistantOverlay.State.IDLE; return }
-        tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "assistant")
+        speakOut(text, "assistant")
     }
 
     /** Claude が呼ぶ端末操作（バックグラウンドスレッドから呼ばれる） */
@@ -671,7 +796,7 @@ $notifs
 
     override fun onAssistantClose() {
         SoundFx.play(SoundFx.Fx.BACK)
-        recognizer?.cancel(); tts?.stop()
+        recognizer?.cancel(); stopSpeech()
         assistant.close()
     }
 
