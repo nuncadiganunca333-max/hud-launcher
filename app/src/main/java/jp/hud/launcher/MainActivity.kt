@@ -2041,7 +2041,11 @@ ${memories().ifEmpty { listOf("（まだなし）") }.joinToString("\n") { "・$
             if (wakeActive && !wakeAllowed()) stopWake()
             if (tick % 60 == 30) proactiveTick()
             face?.let { f ->
-                if (f.running && !f.present && System.currentTimeMillis() - faceGoneAt > 15_000 && !assistant.isShowing && !drive.isShowing) hud.idleNow()
+                // 顔が見えないときの待機は、15秒以上触っていない場合だけ。ワークショップモードはカメラの角度で顔が映らないので使わない
+                val nowMs = System.currentTimeMillis()
+                if (f.running && !f.present && prefs.getBoolean("faceOn", true) && !hud.workshop &&
+                    nowMs - faceGoneAt > 15_000 && nowMs - hud.lastTouchAt > 15_000 &&
+                    !assistant.isShowing && !drive.isShowing && !alert.isShowing) hud.idleNow()
                 if (f.running && f.present) hud.wake()
             }
             if (prefs.getInt("screenOn", 0) == 0 && !s.charging && !drive.isShowing && !assistant.isShowing &&
