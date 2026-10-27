@@ -1094,10 +1094,10 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
                         }.show()
                     12 -> pickCar()
                     13 -> { driveDismissed = false; enterDrive("TEST") }
-                    14 -> { val v = !prefs.getBoolean("faceOn", true); prefs.edit().putBoolean("faceOn", v).apply()
+                    15 -> { val v = !prefs.getBoolean("faceOn", true); prefs.edit().putBoolean("faceOn", v).apply()
                             if (v) startFace() else face?.stop(); toast(if (v) "顔認識をONにしました" else "顔認識をOFFにしました") }
-                    15 -> showMemories()
-                    16 -> openScan(null)
+                    16 -> showMemories()
+                    17 -> openScan(null)
                     14 -> AlertDialog.Builder(this).setTitle("声のサービス")
                         .setItems(arrayOf("ElevenLabs（高品質・要APIキー）", "スマホの読み上げ（無料・オフラインでも可）")) { _, which ->
                             if (which == 0) setupEleven() else { prefs.edit().putString("ttsProvider", "device").apply(); toast("スマホの声に戻しました") }
