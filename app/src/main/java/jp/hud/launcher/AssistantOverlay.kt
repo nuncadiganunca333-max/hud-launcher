@@ -31,9 +31,9 @@ class AssistantOverlay(context: Context) : View(context) {
         set(v) { if (v != field) replyAt = System.currentTimeMillis(); field = v; invalidate() }
     private var replyAt = 0L
 
-    private val CYAN = Color.rgb(0, 229, 255)
+    private val CYAN = Color.rgb(120, 222, 255)
     private val RED = Color.rgb(255, 70, 70)
-    private fun cyan(a: Int) = Color.argb(a.coerceIn(0, 255), 0, 229, 255)
+    private fun cyan(a: Int) = Color.argb(a.coerceIn(0, 255), 120, 222, 255)
     private val start = System.nanoTime()
     private var shownAt = 0L
     private var lvl = 0f
@@ -41,7 +41,7 @@ class AssistantOverlay(context: Context) : View(context) {
     private val panel = RectF()
     private val micR = RectF()
     private val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
-    private val glow = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; maskFilter = BlurMaskFilter(16f, BlurMaskFilter.Blur.NORMAL) }
+    private val glow = Paint(Paint.ANTI_ALIAS_FLAG).apply { blendMode = BlendMode.PLUS; style = Paint.Style.STROKE; maskFilter = BlurMaskFilter(16f, BlurMaskFilter.Blur.NORMAL) }
     private val fill = Paint(Paint.ANTI_ALIAS_FLAG)
     private val label = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = CYAN; typeface = Typeface.create("sans-serif-condensed", Typeface.BOLD) }
     private val body = TextPaint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(215, 248, 255) }

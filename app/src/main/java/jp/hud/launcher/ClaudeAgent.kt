@@ -105,6 +105,12 @@ class ClaudeAgent(var apiKey: String, var model: String = "claude-haiku-5-5") {
                     JSONObject().put("query", str("検索語")), listOf("query")))
                 .put(tool("open_notification", "最近の通知のうち指定番号のものを開く（番号は状況欄の通知一覧の番号）。",
                     JSONObject().put("index", int("通知番号")), listOf("index")))
+                .put(tool("reply_notification", "返信可能な通知（状況欄で［返信可］のもの）に文章で返信する。必ず事前に送る内容を読み上げて相手の了承を得てから呼ぶこと。",
+                    JSONObject().put("index", int("通知番号")).put("text", str("送る文章")), listOf("index", "text")))
+                .put(tool("get_calendar", "カレンダーの予定を取得する。",
+                    JSONObject().put("day", JSONObject().put("type", "string").put("enum", JSONArray(listOf("today", "tomorrow", "week")))), listOf("day")))
+                .put(tool("call_contact", "連絡先の相手に電話をかける。nameは連絡先の名前。",
+                    JSONObject().put("name", str("相手の名前")), listOf("name")))
         }
     }
 }

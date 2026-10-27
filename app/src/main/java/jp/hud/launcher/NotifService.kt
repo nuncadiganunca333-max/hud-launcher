@@ -16,6 +16,7 @@ data class NotifItem(
     val intent: PendingIntent?,
     val autoCancel: Boolean,
     val time: Long,
+    val reply: Notification.Action? = null,
 )
 
 class NotifService : NotificationListenerService() {
@@ -66,8 +67,9 @@ class NotifService : NotificationListenerService() {
             packageManager.getApplicationLabel(packageManager.getApplicationInfo(sbn.packageName, 0)).toString()
         } catch (e: Exception) { sbn.packageName }
 
+        val replyAction = n.actions?.firstOrNull { a -> a.remoteInputs?.any { it.allowFreeFormInput } == true }
         val item = NotifItem(sbn.key, sbn.packageName, label, title, text, n.contentIntent,
-            n.flags and Notification.FLAG_AUTO_CANCEL != 0, now)
+            n.flags and Notification.FLAG_AUTO_CANCEL != 0, now, replyAction)
 
         main.post {
             val s = sink

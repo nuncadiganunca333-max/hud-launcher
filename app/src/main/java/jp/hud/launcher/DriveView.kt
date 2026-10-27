@@ -27,16 +27,16 @@ class DriveView(context: Context) : View(context) {
         set(v) { field = v; noticeAt = System.currentTimeMillis() }
     private var noticeAt = 0L
 
-    private val CYAN = Color.rgb(0, 229, 255)
+    private val CYAN = Color.rgb(120, 222, 255)
     private val RED = Color.rgb(255, 70, 70)
-    private fun cyan(a: Int) = Color.argb(a.coerceIn(0, 255), 0, 229, 255)
+    private fun cyan(a: Int) = Color.argb(a.coerceIn(0, 255), 120, 222, 255)
     private val start = System.nanoTime()
     private var shownAt = 0L
     private var dSpeed = 0f
 
     private val btns = LinkedHashMap<String, RectF>()
     private val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
-    private val glow = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; maskFilter = BlurMaskFilter(18f, BlurMaskFilter.Blur.NORMAL) }
+    private val glow = Paint(Paint.ANTI_ALIAS_FLAG).apply { blendMode = BlendMode.PLUS; style = Paint.Style.STROKE; maskFilter = BlurMaskFilter(18f, BlurMaskFilter.Blur.NORMAL) }
     private val fill = Paint(Paint.ANTI_ALIAS_FLAG)
     private val label = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = CYAN; typeface = Typeface.create("sans-serif-condensed", Typeface.BOLD) }
     private val mono = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = CYAN; typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD) }

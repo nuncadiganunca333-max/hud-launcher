@@ -27,9 +27,9 @@ class AlertOverlay(context: Context) : View(context) {
     private var queued = 0
     private val timeoutMs = 20000L
 
-    private val CYAN = Color.rgb(0, 229, 255)
+    private val CYAN = Color.rgb(120, 222, 255)
     private val RED = Color.rgb(255, 70, 70)
-    private fun cyan(a: Int) = Color.argb(a.coerceIn(0, 255), 0, 229, 255)
+    private fun cyan(a: Int) = Color.argb(a.coerceIn(0, 255), 120, 222, 255)
 
     private val panel = RectF()
     private val iconRect = RectF()
@@ -37,7 +37,7 @@ class AlertOverlay(context: Context) : View(context) {
     private val dismissR = RectF()
 
     private val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
-    private val glow = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    private val glow = Paint(Paint.ANTI_ALIAS_FLAG).apply { blendMode = BlendMode.PLUS;
         style = Paint.Style.STROKE; maskFilter = BlurMaskFilter(16f, BlurMaskFilter.Blur.NORMAL)
     }
     private val fill = Paint(Paint.ANTI_ALIAS_FLAG)

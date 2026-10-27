@@ -140,6 +140,9 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
             }
             ask(android.Manifest.permission.ACCESS_COARSE_LOCATION, "askedLoc")
             ask(android.Manifest.permission.RECORD_AUDIO, "askedMic")
+            ask(android.Manifest.permission.READ_CALENDAR, "askedCal")
+            ask(android.Manifest.permission.READ_CONTACTS, "askedContacts")
+            ask(android.Manifest.permission.CALL_PHONE, "askedCall")
             if (Build.VERSION.SDK_INT >= 31) ask(android.Manifest.permission.BLUETOOTH_CONNECT, "askedBt")
             if (need.isNotEmpty()) requestPermissions(need.toTypedArray(), REQ_LOC)
         }
@@ -149,6 +152,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
         checkTalkIntent(intent)
         if (talkRequested) { talkRequested = false; intent = Intent(this, MainActivity::class.java); handler.postDelayed({ startAssistant() }, 250) }
         else { wakeDeadline = System.currentTimeMillis() + WAKE_WINDOW_MS + 600; startWake(600) }
+        handler.postDelayed({ maybeMorningBriefing() }, 3200)
         NotifService.sink = { onNotif(it, live = true) }
         startMedia()
         // ホーム以外にいた間に届いた通知（10分以内）
@@ -259,6 +263,8 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
         } else if (id == "assistant") {
             // 続けて会話：返事が終わったら自動でマイクを開く
             if (assistant.isShowing && sessionActive) listen(auto = true)
+        } else if (id == "announce") {
+            handler.postDelayed({ if (assistant.isShowing && assistant.state != AssistantOverlay.State.LISTENING && !sessionActive) { assistant.close(); startWake(500) } }, 1500)
         } else if (id == "bye") {
             assistant.close(); startWake(800)
         }
@@ -813,6 +819,102 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
             }.show()
     }
 
+    // ---------- proactive (アトラスから話しかける) ----------
+    private var rainProb: List<Int> = emptyList()
+    private val announced = HashSet<String>()
+    private var lastBattWarn = 100
+
+    private fun canSpeakProactive() = resumed && ttsReady && !silentMode() && !assistant.isShowing && !alert.isShowing && fxPlayer == null
+
+    /** 予定一覧（dayOffset日後から days日分） */
+    private fun events(dayOffset: Int, days: Int = 1): List<Triple<Long, String, Boolean>> {
+        if (checkSelfPermission(android.Manifest.permission.READ_CALENDAR) != android.content.pm.PackageManager.PERMISSION_GRANTED) return emptyList()
+        val cal = java.util.Calendar.getInstance().apply { set(java.util.Calendar.HOUR_OF_DAY, 0); set(java.util.Calendar.MINUTE, 0); set(java.util.Calendar.SECOND, 0); add(java.util.Calendar.DAY_OF_MONTH, dayOffset) }
+        val start = cal.timeInMillis; val end = start + days * 86_400_000L
+        val uri = android.provider.CalendarContract.Instances.CONTENT_URI.buildUpon().also {
+            android.content.ContentUris.appendId(it, start); android.content.ContentUris.appendId(it, end)
+        }.build()
+        val out = ArrayList<Triple<Long, String, Boolean>>()
+        try {
+            contentResolver.query(uri, arrayOf(android.provider.CalendarContract.Instances.BEGIN, android.provider.CalendarContract.Instances.TITLE, android.provider.CalendarContract.Instances.ALL_DAY),
+                null, null, android.provider.CalendarContract.Instances.BEGIN + " ASC")?.use {
+                while (it.moveToNext()) out += Triple(it.getLong(0), it.getString(1) ?: "(無題)", it.getInt(2) == 1)
+            }
+        } catch (e: Exception) { }
+        return out
+    }
+
+    private fun eventsText(dayOffset: Int, days: Int = 1): String {
+        if (checkSelfPermission(android.Manifest.permission.READ_CALENDAR) != android.content.pm.PackageManager.PERMISSION_GRANTED) return "カレンダーへのアクセスが未許可"
+        val ev = events(dayOffset, days)
+        if (ev.isEmpty()) return "予定なし"
+        val f = java.text.SimpleDateFormat(if (days > 1) "M/d(E) H:mm" else "H:mm", Locale.JAPAN)
+        return ev.take(10).joinToString("、") { (t, title, allDay) -> if (allDay) "終日 $title" else "${f.format(java.util.Date(t))} $title" }
+    }
+
+    /** 朝いちばんにホームを開いたときのブリーフィング */
+    private fun maybeMorningBriefing() {
+        val now = java.util.Calendar.getInstance()
+        val h = now.get(java.util.Calendar.HOUR_OF_DAY)
+        val today = java.text.SimpleDateFormat("yyyyMMdd", Locale.US).format(now.time)
+        if (h !in 5..10 || prefs.getString("briefDate", "") == today || !canSpeakProactive()) return
+        prefs.edit().putString("briefDate", today).apply()
+        val s = hud.stats
+        val ev = events(0).filter { !it.third && it.first > System.currentTimeMillis() }
+        val f = java.text.SimpleDateFormat("H時mm分", Locale.JAPAN)
+        val sb = StringBuilder("おはようございます、${callName()}。")
+        if (s.temp != null) sb.append("現在の${placeName.split(" ").last()}は${s.weather}、気温${s.temp!!.roundToIntSafe()}度です。")
+        s.forecast.firstOrNull()?.let { sb.append("今日は${it.substringAfter("今日").trim().replace("/", "から")}の見込みです。") }
+        if ((rainProb.take(12).maxOrNull() ?: 0) >= 50 && !s.weather.contains("雨")) sb.append("午後にかけて雨の可能性がありますので、傘をお持ちください。")
+        when {
+            ev.isEmpty() -> sb.append("本日の予定は入っておりません。")
+            else -> sb.append("本日の予定は${ev.size}件、最初は${f.format(java.util.Date(ev[0].first))}から${ev[0].second}です。")
+        }
+        if (recentNotifs.isNotEmpty()) sb.append("未確認の通知が${recentNotifs.size}件あります。")
+        if (s.battery in 1..40 && !s.charging) sb.append("なお、電池が${s.battery}%ですので、お出かけ前に充電をおすすめします。")
+        sb.append("良い一日を。")
+        announce(sb.toString())
+    }
+
+    private fun Float.roundToIntSafe() = Math.round(this)
+
+    /** アトラスのパネルを出して読み上げ、終わったら閉じる */
+    private fun announce(text: String) {
+        if (!canSpeakProactive()) return
+        closeDrawer()
+        assistant.title = aiTag()
+        assistant.open()
+        assistant.heard = ""
+        assistant.state = AssistantOverlay.State.SPEAKING
+        assistant.reply = text
+        speakOut(text, "announce")
+    }
+
+    private fun checkRainSoon() {
+        val key = "rain:" + java.text.SimpleDateFormat("yyyyMMddHH", Locale.US).format(java.util.Date()).dropLast(1)
+        if (hud.stats.weather.contains("雨") || key in announced) return
+        val soon = rainProb.take(3).maxOrNull() ?: 0
+        if (soon >= 60 && canSpeakProactive()) { announced += key; announce("${callName()}、まもなく雨が降り出しそうです。降水確率は${soon}%。傘をお忘れなく。") }
+    }
+
+    /** 毎分：予定10分前・電池低下 */
+    private fun proactiveTick() {
+        val nowMs = System.currentTimeMillis()
+        for ((t, title, allDay) in events(0)) {
+            if (allDay) continue
+            val mins = (t - nowMs) / 60000
+            val key = "ev:$t:$title"
+            if (mins in 9..10 && key !in announced && canSpeakProactive()) {
+                announced += key; announce("${callName()}、10分後に「$title」のご予定です。"); return
+            }
+        }
+        val s = hud.stats
+        if (!s.charging && s.battery in 1..20 && lastBattWarn > 20 && canSpeakProactive()) {
+            lastBattWarn = s.battery
+            announce("電池残量が${s.battery}%になりました。そろそろ充電をおすすめします。")
+        } else if (s.charging || s.battery > 25) lastBattWarn = 100
+    }
+
     // ---------- Claude assistant ----------
     private fun apiKey() = prefs.getString("apiKey", "") ?: ""
 
@@ -1226,12 +1328,14 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
         val now = java.text.SimpleDateFormat("yyyy年M月d日(E) H:mm", Locale.JAPAN).format(java.util.Date())
         val m = hud.media
         val media = if (m == null) "なし" else "${m.title} / ${m.artist}（${if (m.playing) "再生中" else "一時停止"}）"
-        val notifs = recentNotifs.mapIndexed { i, n -> "${i + 1}. ${n.appLabel}：${n.title}" }.joinToString("\n").ifEmpty { "なし" }
+        val notifs = recentNotifs.mapIndexed { i, n -> "${i + 1}. ${n.appLabel}：${n.title}「${n.text.take(40)}」${if (n.reply != null) "［返信可］" else ""}" }.joinToString("\n").ifEmpty { "なし" }
         val appNames = apps.joinToString("、") { it.label }
         return """あなたは${callName()}のスマートフォン（Galaxy Z Fold7）のホーム画面に組み込まれたAIアシスタント「${aiName()}」です（中身はAnthropicのClaude）。名前を聞かれたら${aiName()}と名乗ってください。
 ${if (drive.isShowing) "現在${callName()}は運転中です。返答はとくに短く、画面を見なくて済む内容にし、運転の妨げになる操作は勧めないでください。" else ""}
-映画に出てくる有能なAI執事のように、落ち着いて丁寧、ときどき軽いウィットを交えて話してください。相手は「${callName()}」と呼びます。
+あなたの人格：英国の老練な執事のように、落ち着いた丁寧語で話す。控えめだが有能で、ときどき乾いた皮肉まじりのユーモアをひとことだけ添える（やりすぎない）。相手は「${callName()}」と呼ぶ。
+返事は「かしこまりました」「承知しました」などで簡潔に始め、聞かれたことに答えたうえで、状況から気づいたことがあれば一歩先の提案をひとつだけ添える（例：雨予報なら傘、電池が少なければ充電、予定が近ければ出発時刻）。
 返答は音声で読み上げられます。話し言葉で1〜3文に短くまとめ、記号・箇条書き・絵文字・URLは使わないでください。
+通知への返信は、必ず先に「〇〇さんに『…』と返信します。よろしいですか？」と確認し、了承されてからreply_notificationを使うこと。
 端末の操作が必要なときはツールを使い、実行後は結果をひとことで伝えてください。わからないことや最新情報は推測で断言せず、必要ならweb_searchを使ってください。
 テスラ車の直接操作はできません。頼まれたら、ホームのMODULE欄のテスラウィジェットかテスラアプリを案内してください。
 
@@ -1240,6 +1344,7 @@ ${if (drive.isShowing) "現在${callName()}は運転中です。返答はとく�
 バッテリー：${s.battery}%（${if (s.charging) "充電中" else "放電中"}）、端末温度 ${s.battTemp}℃
 天気（${placeName}）：${s.weather}、気温 ${s.temp ?: "不明"}℃、湿度 ${s.humidity}%、風速 ${s.wind}m/s
 予報：${s.forecast.joinToString("／")}
+今日の予定：${eventsText(0)}
 再生中：$media
 最近の通知：
 $notifs
@@ -1325,6 +1430,35 @@ $notifs
             "web_search" -> {
                 ui { handler.postDelayed({ assistant.close(); safeStart(Intent(Intent.ACTION_WEB_SEARCH).putExtra(android.app.SearchManager.QUERY, input.optString("query"))) }, 1600) }
                 "検索を開きます"
+            }
+            "reply_notification" -> {
+                val n = recentNotifs.toList().getOrNull(input.optInt("index") - 1) ?: return "その番号の通知はありません"
+                val a = n.reply ?: return "この通知には返信できません"
+                val text = input.optString("text")
+                try {
+                    val intent = Intent()
+                    val b = Bundle()
+                    a.remoteInputs.filter { it.allowFreeFormInput }.forEach { b.putCharSequence(it.resultKey, text) }
+                    android.app.RemoteInput.addResultsToIntent(a.remoteInputs, intent, b)
+                    a.actionIntent.send(this, 0, intent)
+                    "${n.title}さんに返信しました"
+                } catch (e: Exception) { "返信に失敗しました" }
+            }
+            "get_calendar" -> when (input.optString("day")) { "tomorrow" -> eventsText(1); "week" -> eventsText(0, 7); else -> eventsText(0) }
+            "call_contact" -> {
+                if (checkSelfPermission(android.Manifest.permission.READ_CONTACTS) != android.content.pm.PackageManager.PERMISSION_GRANTED)
+                    return "連絡先へのアクセスが許可されていません。設定から許可してください"
+                val q = input.optString("name")
+                val cur = contentResolver.query(android.provider.ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+                    arrayOf(android.provider.ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME, android.provider.ContactsContract.CommonDataKinds.Phone.NUMBER),
+                    "${android.provider.ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME} LIKE ?", arrayOf("%$q%"), null)
+                val hit = cur?.use { if (it.moveToFirst()) it.getString(0) to it.getString(1) else null } ?: return "「$q」は連絡先に見つかりませんでした"
+                val canCall = checkSelfPermission(android.Manifest.permission.CALL_PHONE) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                ui { handler.postDelayed({
+                    sessionActive = false; recognizer?.cancel(); assistant.close()
+                    safeStart(Intent(if (canCall) Intent.ACTION_CALL else Intent.ACTION_DIAL, android.net.Uri.parse("tel:" + hit.second)))
+                }, 1800) }
+                "${hit.first}さんに発信します"
             }
             "open_notification" -> {
                 val n = recentNotifs.toList().getOrNull(input.optInt("index") - 1) ?: return "その番号の通知はありません"
@@ -1597,6 +1731,7 @@ $notifs
             hud.lowPower = !s.charging
             updateTalkHint()
             if (wakeActive && !wakeAllowed()) stopWake()
+            if (tick % 60 == 30) proactiveTick()
             if (prefs.getInt("screenOn", 0) == 0 && !s.charging && !drive.isShowing && !assistant.isShowing &&
                 System.currentTimeMillis() - hud.lastTouchAt > 180_000) {
                 window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -1656,7 +1791,7 @@ $notifs
             try {
                 val url = URL("https://api.open-meteo.com/v1/forecast?latitude=$lat&longitude=$lon" +
                         "&current=temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,wind_speed_10m&wind_speed_unit=ms" +
-                        "&daily=weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset&timezone=Asia%2FTokyo&forecast_days=4&hourly=temperature_2m&forecast_hours=24")
+                        "&daily=weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset&timezone=Asia%2FTokyo&forecast_days=4&hourly=temperature_2m,precipitation_probability&forecast_hours=24")
                 val con = url.openConnection() as HttpURLConnection
                 con.connectTimeout = 8000; con.readTimeout = 8000
                 val body = con.inputStream.bufferedReader().readText()
@@ -1683,6 +1818,8 @@ $notifs
                         forecast = lines,
                         hourly = j.optJSONObject("hourly")?.optJSONArray("temperature_2m")?.let { a -> (0 until a.length()).map { a.getDouble(it).toFloat() } } ?: emptyList(),
                     )
+                    rainProb = j.optJSONObject("hourly")?.optJSONArray("precipitation_probability")?.let { a -> (0 until a.length()).map { a.optInt(it) } } ?: emptyList()
+                    checkRainSoon()
                 }
             } catch (e: Exception) {
                 lastWeather = System.currentTimeMillis() - 25 * 60 * 1000 // 5分後に再試行

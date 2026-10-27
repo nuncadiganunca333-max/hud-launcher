@@ -111,11 +111,11 @@ class HudView(context: Context) : View(context), SensorEventListener {
         flashRect = RectF(src); flashLabel = name; flashStart = System.currentTimeMillis(); invalidate()
     }
 
-    private val CYAN = Color.rgb(0, 229, 255)
+    private val CYAN = Color.rgb(120, 222, 255)
     private val BLUE = Color.rgb(120, 200, 255)
     private val RED = Color.rgb(255, 70, 70)
     private val DARK = Color.rgb(1, 10, 20)
-    private fun cyan(a: Int) = Color.argb(a.coerceIn(0, 255), 0, 229, 255)
+    private fun cyan(a: Int) = Color.argb(a.coerceIn(0, 255), 120, 222, 255)
     private fun withA(col: Int, a: Int) = Color.argb(a.coerceIn(0, 255), Color.red(col), Color.green(col), Color.blue(col))
 
     private var running = false
@@ -162,7 +162,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
 
     // ---- paints ----
     private val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
-    private val glow = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    private val glow = Paint(Paint.ANTI_ALIAS_FLAG).apply { blendMode = BlendMode.PLUS;
         style = Paint.Style.STROKE; maskFilter = BlurMaskFilter(16f, BlurMaskFilter.Blur.NORMAL)
     }
     private val fill = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -336,16 +336,33 @@ class HudView(context: Context) : View(context), SensorEventListener {
 
     private fun headerH() = unit * 1.05f
 
+    /** 角を斜めに切り落としたパネル形状 */
+    private fun chamfer(r: RectF, k: Float): Path = Path().apply {
+        moveTo(r.left + k, r.top); lineTo(r.right - k * 0.4f, r.top); lineTo(r.right, r.top + k * 0.4f)
+        lineTo(r.right, r.bottom - k); lineTo(r.right - k, r.bottom); lineTo(r.left + k * 0.4f, r.bottom)
+        lineTo(r.left, r.bottom - k * 0.4f); lineTo(r.left, r.top + k); close()
+    }
+
     private fun panelFrame(c: Canvas, r: RectF, title: String?) {
-        fill.color = Color.WHITE; fill.shader = LinearGradient(0f, r.top, 0f, r.bottom, Color.argb(200, 3, 30, 50), Color.argb(215, 1, 14, 26), Shader.TileMode.CLAMP)
-        c.drawRect(r, fill); fill.shader = null
-        stroke.strokeWidth = 2f; stroke.color = cyan(120); c.drawRect(r, stroke)
-        stroke.strokeWidth = 1f; stroke.color = cyan(40)
-        c.drawRect(r.left + 5, r.top + 5, r.right - 5, r.bottom - 5, stroke)
+        val k = unit * 0.9f
+        val shape = chamfer(r, k)
+        fill.color = Color.WHITE; fill.shader = LinearGradient(0f, r.top, 0f, r.bottom, Color.argb(195, 4, 26, 44), Color.argb(215, 1, 10, 20), Shader.TileMode.CLAMP)
+        c.drawPath(shape, fill); fill.shader = null
+        glow.strokeWidth = 6f; glow.color = cyan(60); c.drawPath(shape, glow)
+        stroke.strokeWidth = 1.4f; stroke.color = cyan(150); c.drawPath(shape, stroke)
+        val inset = RectF(r.left + 6, r.top + 6, r.right - 6, r.bottom - 6)
+        stroke.strokeWidth = 0.8f; stroke.color = cyan(35); c.drawPath(chamfer(inset, k * 0.8f), stroke)
+        // edge ticks
+        stroke.strokeWidth = 1f; stroke.color = cyan(90)
+        var ty = r.top + k * 1.6f
+        while (ty < r.bottom - k * 1.6f) { c.drawLine(r.right - unit * 0.25f, ty, r.right, ty, stroke); ty += unit * 0.5f }
         if (title != null) {
             val hh = headerH()
-            fill.color = cyan(34); c.drawRect(r.left, r.top, r.right, r.top + hh, fill)
-            stroke.strokeWidth = 1.5f; stroke.color = cyan(150)
+            c.save(); c.clipPath(shape)
+            fill.color = Color.WHITE; fill.shader = LinearGradient(r.left, 0f, r.right, 0f, cyan(55), cyan(6), Shader.TileMode.CLAMP)
+            c.drawRect(r.left, r.top, r.right, r.top + hh, fill); fill.shader = null
+            c.restore()
+            stroke.strokeWidth = 1f; stroke.color = cyan(140)
             c.drawLine(r.left, r.top + hh, r.right, r.top + hh, stroke)
             label.textAlign = Paint.Align.LEFT; label.textSize = hh * 0.55f; label.letterSpacing = 0.18f; label.color = CYAN
             c.drawText(title, r.left + hh * 0.45f, r.top + hh * 0.7f, label)
@@ -356,10 +373,13 @@ class HudView(context: Context) : View(context), SensorEventListener {
                 c.drawRect(x - s, r.top + hh / 2 - s / 2, x, r.top + hh / 2 + s / 2, fill)
             }
         }
-        stroke.strokeWidth = 5f; stroke.color = CYAN
-        val a = unit * 1.2f
-        c.drawLine(r.left, r.top, r.left + a, r.top, stroke); c.drawLine(r.left, r.top, r.left, r.top + a * 0.6f, stroke)
-        c.drawLine(r.right - a, r.bottom, r.right, r.bottom, stroke); c.drawLine(r.right, r.bottom - a * 0.6f, r.right, r.bottom, stroke)
+        // bright accents on the cut corners
+        stroke.strokeWidth = 3f; stroke.color = Color.argb(255, 210, 245, 255)
+        c.drawLine(r.left, r.top + k, r.left + k, r.top, stroke)
+        c.drawLine(r.right - k, r.bottom, r.right, r.bottom - k, stroke)
+        glow.strokeWidth = 10f; glow.color = cyan(160)
+        c.drawLine(r.left, r.top + k, r.left + k, r.top, glow)
+        c.drawLine(r.right - k, r.bottom, r.right, r.bottom - k, glow)
     }
 
     // ======================= FRAME =======================
@@ -1182,7 +1202,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
         c.drawPath(hexPath(hr, t * 6f), fill); fill.shader = null
         val pulse = (sin(t * 2.2f) + 1) / 2
         glow.strokeWidth = 16f; glow.color = cyan((90 + 100 * pulse).toInt()); c.drawPath(hexPath(hr, t * 6f), glow)
-        stroke.strokeWidth = 4f; stroke.color = CYAN; c.drawPath(hexPath(hr, t * 6f), stroke)
+        stroke.strokeWidth = 2.5f; stroke.color = Color.argb(255, 210, 245, 255); c.drawPath(hexPath(hr, t * 6f), stroke)
         stroke.strokeWidth = 1.5f; stroke.color = cyan(130); c.drawPath(hexPath(hr * 0.88f, -t * 10f), stroke)
         stroke.strokeWidth = 1f; stroke.color = cyan(70); c.drawPath(hexPath(hr * 0.76f, t * 15f), stroke)
         // hex vertices nodes
