@@ -28,7 +28,8 @@ class AssistantOverlay(context: Context) : View(context) {
     var heard = ""
         set(v) { field = v; invalidate() }
     var reply = ""
-        set(v) { field = v; invalidate() }
+        set(v) { if (v != field) replyAt = System.currentTimeMillis(); field = v; invalidate() }
+    private var replyAt = 0L
 
     private val CYAN = Color.rgb(0, 229, 255)
     private val RED = Color.rgb(255, 70, 70)
@@ -150,7 +151,8 @@ class AssistantOverlay(context: Context) : View(context) {
             y += hl.height + u * 0.5f
         }
         val shown = when {
-            reply.isNotEmpty() -> reply
+            reply.isNotEmpty() -> reply.take(((System.currentTimeMillis() - replyAt) / 28).toInt().coerceAtMost(reply.length)) +
+                (if ((System.currentTimeMillis() - replyAt) / 28 < reply.length) "▌" else "")
             state == State.THINKING -> "考えています" + ".".repeat(((t * 3).toInt() % 4))
             state == State.LISTENING && heard.isEmpty() -> "ご用件をどうぞ。"
             else -> ""

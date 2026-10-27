@@ -144,6 +144,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
             if (need.isNotEmpty()) requestPermissions(need.toTypedArray(), REQ_LOC)
         }
         updateTalkHint()
+        hud.userTag = callName().removeSuffix("さん").removeSuffix("様").let { n -> if (n == "Yudai" || n.all { it.code < 128 }) n.uppercase() else n }
         checkCarConnected()
         checkTalkIntent(intent)
         if (talkRequested) { talkRequested = false; intent = Intent(this, MainActivity::class.java); handler.postDelayed({ startAssistant() }, 250) }
@@ -1247,6 +1248,7 @@ $notifs
 
     private fun think(text: String) {
         assistant.state = AssistantOverlay.State.THINKING
+        hud.thinking = true
         agent.apiKey = apiKey()
         val sys = systemPrompt()
         thread {
@@ -1254,6 +1256,7 @@ $notifs
                 agent.ask(text, sys, ClaudeAgent.tools()) { name, input -> runTool(name, input) }
             } catch (e: ClaudeAgent.ApiError) { "ERR:" + e.message }
             runOnUiThread {
+                hud.thinking = false
                 if (!assistant.isShowing) return@runOnUiThread
                 if (out.startsWith("ERR:")) {
                     SoundFx.play(SoundFx.Fx.ERROR)

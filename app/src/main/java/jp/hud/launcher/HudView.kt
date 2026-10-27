@@ -77,7 +77,16 @@ class HudView(context: Context) : View(context), SensorEventListener {
     var voiceOn = true
         set(v) { field = v; invalidate() }
     var stats = Stats()
-        set(v) { field = v; invalidate() }
+        set(v) {
+            if (statsInit && v.charging != field.charging) { chargeEventAt = System.currentTimeMillis(); chargeOn = v.charging }
+            statsInit = true
+            field = v; invalidate()
+        }
+    private var statsInit = false
+    private var chargeEventAt = 0L
+    private var chargeOn = false
+    var thinking = false
+    var userTag = "YUDAI"
     // ---- external inputs for effects ----
     var geoLat = 35.02; var geoLon = 138.48
     var speaking = false          // assistant voice output
@@ -391,6 +400,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
         layerPaint.alpha = (255 * min(1f, boot * 2.5f)).toInt()
         c.drawBitmap(bg, -bgMargin - px * 0.7f, -bgMargin - py * 0.7f, layerPaint)
         if (!lowPower) drawDataRain(c, t)
+        drawWeatherFx(c, t)
 
         // core group
         c.save()
@@ -453,6 +463,15 @@ class HudView(context: Context) : View(context), SensorEventListener {
         ovLayer?.let { c.drawBitmap(it, 0f, 0f, null) }
         drawRipples(c, nowMs)
         drawIncoming(c, nowMs)
+        if (idleP < 0.3f && expanded == null) {
+            drawAutoScan(c, t, nowMs)
+            drawThinkingStreams(c, t)
+            drawGlitch(c, nowMs)
+        }
+        drawHourly(c, now, nowMs)
+        drawChargeFx(c, nowMs)
+        drawLowBattery(c, t)
+        drawGreeting(c, nowMs)
         drawExpanded(c, t, now, nowMs)
         drawFlash(c)
         val sy = ((t * 0.1f) % 1f) * height
@@ -681,6 +700,226 @@ class HudView(context: Context) : View(context), SensorEventListener {
     // ===== ⑦ boot log =====
     private val bootLines = listOf("INITIALIZING HUD//OS", "CORE REACTOR ........ OK", "SENSOR ARRAY ........ OK", "HOLO PROJECTOR ...... OK",
         "NETWORK LINK ........ OK", "VOICE INTERFACE ..... OK", "ALL SYSTEMS ONLINE")
+
+    // ===== extra cinematic effects =====
+
+    /** 天気に合わせたホログラムの雨・雪 */
+    private fun drawWeatherFx(c: Canvas, t: Float) {
+        val w = stats.weather
+        val rain = w.contains("雨"); val snow = w.contains("雪"); val storm = w.contains("雷")
+        if (!rain && !snow) return
+        val n = if (lowPower) 30 else 70
+        for (k in 0 until n) {
+            val r = Random(k * 92821)
+            val x0 = r.nextFloat() * (width + height * 0.3f)
+            val sp = 0.25f + r.nextFloat() * 0.35f
+            val q = ((t * sp + r.nextFloat()) % 1f)
+            val y = q * (height + unit * 4) - unit * 2
+            if (snow) {
+                val x = (x0 + sin(t * 0.8f + k) * unit * 0.6f) % width
+                fill.color = cyan((60 + 80 * r.nextFloat()).toInt()); c.drawCircle(x, y, 2f + r.nextFloat() * 2f, fill)
+            } else {
+                val x = x0 - y * 0.25f
+                stroke.strokeWidth = 1.5f; stroke.color = cyan((30 + 60 * r.nextFloat()).toInt())
+                c.drawLine(x, y, x - unit * 0.25f, y + unit * 1.0f, stroke)
+            }
+        }
+        if (storm && (t * 10).toInt() % 97 < 2) { fill.color = cyan(40); c.drawRect(0f, 0f, width.toFloat(), height.toFloat(), fill) }
+    }
+
+    /** 地球儀のまわりを回る衛星 */
+    private fun drawSatellites(c: Canvas, r: Float, t: Float) {
+        for (k in 0 until 3) {
+            val a = t * (0.6f + k * 0.25f) + k * 2f
+            val tilt = 0.35f + k * 0.18f
+            val rr = r * (1.12f + k * 0.07f)
+            stroke.strokeWidth = 1f; stroke.color = cyan(35)
+            c.save(); c.rotate(k * 55f - 20f, cx, cy)
+            c.drawOval(cx - rr, cy - rr * tilt, cx + rr, cy + rr * tilt, stroke)
+            for (j in 0 until 8) {
+                val aa = a - j * 0.06f
+                val x = cx + cos(aa) * rr; val y = cy + sin(aa) * rr * tilt
+                fill.color = cyan(((1 - j / 8f) * if (sin(aa) > 0) 230 else 90).toInt())
+                c.drawCircle(x, y, unit * (0.1f - j * 0.01f).coerceAtLeast(0.02f), fill)
+            }
+            c.restore()
+        }
+    }
+
+    /** 定期的にパネルを照準でロックして解析する演出 */
+    private fun drawAutoScan(c: Canvas, t: Float, nowMs: Long) {
+        val period = 16000L
+        val phase = nowMs % period
+        if (phase > 3200 || panels.isEmpty()) return
+        val keys = panels.keys.filter { it != "MODULE" }
+        if (keys.isEmpty()) return
+        val name = keys[((nowMs / period) % keys.size).toInt()]
+        val r = panels[name] ?: return
+        val p = phase / 3200f
+        // reticle flies from core to panel, locks, scans
+        val fly = ease((p / 0.3f).coerceIn(0f, 1f))
+        val tx = cx + (r.centerX() - cx) * fly; val ty = cy + (r.centerY() - cy) * fly
+        val lock = ((p - 0.3f) / 0.15f).coerceIn(0f, 1f)
+        val fade = if (p > 0.85f) 1f - (p - 0.85f) / 0.15f else 1f
+        val hw = unit * 1.5f + (r.width() / 2 + unit * 0.3f - unit * 1.5f) * ease(lock)
+        val hh = unit * 1.5f + (r.height() / 2 + unit * 0.3f - unit * 1.5f) * ease(lock)
+        val a = unit * 1.3f
+        stroke.strokeWidth = 4f; stroke.color = cyan((255 * fade).toInt())
+        for ((sx, sy) in listOf(-1f to -1f, 1f to -1f, -1f to 1f, 1f to 1f)) {
+            val x = tx + sx * hw; val y = ty + sy * hh
+            c.drawLine(x, y, x - sx * a, y, stroke); c.drawLine(x, y, x, y - sy * a, stroke)
+        }
+        if (lock < 1f) {
+            stroke.strokeWidth = 2f; c.drawCircle(tx, ty, unit * 0.5f, stroke)
+            c.drawLine(tx - unit, ty, tx + unit, ty, stroke); c.drawLine(tx, ty - unit, tx, ty + unit, stroke)
+        } else {
+            val sp = ((p - 0.45f) / 0.35f).coerceIn(0f, 1f)
+            val sx = r.left + r.width() * sp
+            fill.color = Color.WHITE
+            fill.shader = LinearGradient(sx - unit * 3, 0f, sx, 0f, Color.TRANSPARENT, cyan((90 * fade).toInt()), Shader.TileMode.CLAMP)
+            c.drawRect(sx - unit * 3, r.top, sx, r.bottom, fill); fill.shader = null
+            stroke.strokeWidth = 2f; stroke.color = cyan((230 * fade).toInt()); c.drawLine(sx, r.top, sx, r.bottom, stroke)
+            label.textAlign = Paint.Align.LEFT; label.textSize = unit * 0.42f; label.letterSpacing = 0.25f
+            val txt = if (sp < 1f) "ANALYZING $name  ${(sp * 100).toInt()}%" else "$name  ▸  NOMINAL"
+            val ly = r.top - unit * 0.55f
+            fill.color = Color.argb((200 * fade).toInt(), 0, 8, 16)
+            c.drawRect(r.left, ly - label.textSize, r.left + label.measureText(txt) + unit * 0.4f, ly + label.textSize * 0.35f, fill)
+            label.color = cyan((255 * fade).toInt()); c.drawText(txt, r.left + unit * 0.2f, ly, label)
+            label.letterSpacing = 0f; label.color = CYAN
+        }
+    }
+
+    /** AIが考えている間、各パネルからコアへデータが流れ込む */
+    private fun drawThinkingStreams(c: Canvas, t: Float) {
+        if (!thinking) return
+        var k = 0
+        for ((_, r) in panels) {
+            val sx = r.centerX(); val sy = r.centerY()
+            for (j in 0 until 4) {
+                val q = ((t * 1.3f + j * 0.25f + k * 0.13f) % 1f)
+                val x = sx + (cx - sx) * q; val y = sy + (cy - sy) * q
+                val x2 = sx + (cx - sx) * (q - 0.06f).coerceAtLeast(0f); val y2 = sy + (cy - sy) * (q - 0.06f).coerceAtLeast(0f)
+                glow.strokeWidth = 8f; glow.color = cyan(150); c.drawLine(x2, y2, x, y, glow)
+                stroke.strokeWidth = 2.5f; stroke.color = Color.WHITE; c.drawLine(x2, y2, x, y, stroke)
+            }
+            stroke.strokeWidth = 1f; stroke.color = cyan(40); c.drawLine(sx, sy, cx, cy, stroke)
+            k++
+        }
+        label.textAlign = Paint.Align.CENTER; label.textSize = unit * 0.5f; label.letterSpacing = 0.4f
+        label.color = cyan((150 + 100 * sin(t * 6f)).toInt())
+        c.drawText("PROCESSING", cx, cy - coreR * 1.45f, label)
+        label.letterSpacing = 0f; label.color = CYAN
+    }
+
+    /** ときどき走るホログラムのノイズ */
+    private fun drawGlitch(c: Canvas, nowMs: Long) {
+        val slot = nowMs / 13000L
+        val start = slot * 13000L + Random(slot).nextLong(3000, 11000)
+        val age = nowMs - start
+        if (age < 0 || age > 220) return
+        val fg = fgLayer ?: return
+        val r = Random(nowMs / 40)
+        val pr = Paint().apply { colorFilter = PorterDuffColorFilter(Color.argb(150, 255, 60, 80), PorterDuff.Mode.SRC_IN); alpha = 140 }
+        val pc = Paint().apply { alpha = 160 }
+        repeat(5) {
+            val y = r.nextInt(height.coerceAtLeast(2)); val h = r.nextInt((unit * 0.4f).toInt().coerceAtLeast(2), (unit * 2f).toInt().coerceAtLeast(3))
+            val dx = r.nextInt(-(unit * 0.8f).toInt(), (unit * 0.8f).toInt() + 1)
+            val src = Rect(0, y, width, (y + h).coerceAtMost(height))
+            c.drawBitmap(fg, src, RectF(dx + 6f, y.toFloat(), width + dx + 6f, (y + h).toFloat()), pr)
+            c.drawBitmap(fg, src, RectF(dx.toFloat(), y.toFloat(), (width + dx).toFloat(), (y + h).toFloat()), pc)
+        }
+        postInvalidateOnAnimation()
+    }
+
+    /** 毎正時に時報演出 */
+    private fun drawHourly(c: Canvas, now: Calendar, nowMs: Long) {
+        if (now.get(Calendar.MINUTE) != 0 || now.get(Calendar.SECOND) > 5) return
+        val p = (now.get(Calendar.SECOND) * 1000 + now.get(Calendar.MILLISECOND)) / 6000f
+        for (k in 0 until 3) {
+            val q = ((p * 2f) - k * 0.2f).coerceIn(0f, 1f)
+            glow.strokeWidth = 16f; glow.color = cyan((200 * (1 - q)).toInt()); c.drawCircle(cx, cy, coreR * (1f + q * 1.5f), glow)
+            stroke.strokeWidth = 3f; stroke.color = cyan((255 * (1 - q)).toInt()); c.drawCircle(cx, cy, coreR * (1f + q * 1.5f), stroke)
+        }
+        val fade = if (p > 0.8f) (1 - p) / 0.2f else min(1f, p * 5)
+        label.textAlign = Paint.Align.CENTER; label.textSize = unit * 0.7f; label.letterSpacing = 0.4f; label.color = cyan((255 * fade).toInt())
+        c.drawText(String.format(Locale.US, "%02d:00  ―  HOURLY SYNC", now.get(Calendar.HOUR_OF_DAY)), cx, cy - coreR * 1.5f, label)
+        label.letterSpacing = 0f; label.color = CYAN
+        postInvalidateOnAnimation()
+    }
+
+    /** 充電を挿した／抜いた瞬間の演出 */
+    private fun drawChargeFx(c: Canvas, nowMs: Long) {
+        val age = nowMs - chargeEventAt
+        if (age > 2600 || chargeEventAt == 0L) return
+        val p = age / 2600f
+        val col = if (chargeOn) CYAN else RED
+        if (chargeOn) {
+            // energy rises from the bottom edge into the core
+            for (k in 0 until 7) {
+                val x0 = width * (0.2f + 0.1f * k)
+                val q = ((p * 2.2f) - k * 0.06f).coerceIn(0f, 1f)
+                if (q <= 0f || q >= 1f) continue
+                val hy = height - (height - cy) * ease(q); val ty2 = height - (height - cy) * ease((q - 0.2f).coerceAtLeast(0f))
+                val hx = x0 + (cx - x0) * ease(q); val tx2 = x0 + (cx - x0) * ease((q - 0.2f).coerceAtLeast(0f))
+                glow.strokeWidth = 12f; glow.color = cyan(180); c.drawLine(tx2, ty2, hx, hy, glow)
+                stroke.strokeWidth = 3f; stroke.color = Color.WHITE; c.drawLine(tx2, ty2, hx, hy, stroke)
+            }
+            if (p > 0.45f) {
+                val q = ((p - 0.45f) / 0.4f).coerceIn(0f, 1f)
+                glow.strokeWidth = 30f; glow.color = cyan((220 * (1 - q)).toInt()); c.drawCircle(cx, cy, coreR * (0.5f + q * 0.8f), glow)
+            }
+        } else {
+            fill.color = Color.argb((90 * (1 - p)).toInt(), 255, 40, 40); c.drawRect(0f, 0f, width.toFloat(), height.toFloat(), fill)
+        }
+        val fade = if (p > 0.8f) (1 - p) / 0.2f else min(1f, p * 6)
+        val txt = if (chargeOn) "⚡  POWER LINK ESTABLISHED" else "POWER LINK SEVERED"
+        label.textAlign = Paint.Align.CENTER; label.textSize = unit * 0.75f; label.letterSpacing = 0.35f
+        val ty = cy + coreR * 1.55f
+        fill.color = Color.argb((200 * fade).toInt(), 0, 8, 16)
+        c.drawRect(cx - label.measureText(txt) / 2 - unit, ty - label.textSize * 1.2f, cx + label.measureText(txt) / 2 + unit, ty + label.textSize * 0.6f, fill)
+        stroke.strokeWidth = 2f; stroke.color = withA(col, (255 * fade).toInt())
+        c.drawRect(cx - label.measureText(txt) / 2 - unit, ty - label.textSize * 1.2f, cx + label.measureText(txt) / 2 + unit, ty + label.textSize * 0.6f, stroke)
+        label.color = withA(col, (255 * fade).toInt()); c.drawText(txt, cx, ty, label)
+        label.letterSpacing = 0f; label.color = CYAN
+        postInvalidateOnAnimation()
+    }
+
+    /** 電池が少ないときの赤い警告 */
+    private fun drawLowBattery(c: Canvas, t: Float) {
+        val s = stats
+        if (s.charging || s.battery > 15 || s.battery <= 0) return
+        val a = (0.5f + 0.5f * sin(t * 3f))
+        glow.strokeWidth = unit * 1.2f; glow.color = Color.argb((140 * a).toInt(), 255, 40, 40)
+        c.drawRect(0f, 0f, width.toFloat(), height.toFloat(), glow)
+        label.textAlign = Paint.Align.CENTER; label.textSize = unit * 0.5f; label.letterSpacing = 0.4f
+        label.color = Color.argb((120 + 135 * a).toInt(), 255, 80, 80)
+        c.drawText("⚠ POWER CRITICAL  ${s.battery}%", width / 2f, topStrip.bottom + unit * 0.75f, label)
+        label.letterSpacing = 0f; label.color = CYAN
+    }
+
+    /** 起動ログのあとに挨拶 */
+    private fun drawGreeting(c: Canvas, nowMs: Long) {
+        val age = nowMs - bootStart - 1500
+        if (age < 0 || age > 3200) return
+        val h = Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
+        val g = when (h) { in 4..10 -> "GOOD MORNING"; in 11..16 -> "GOOD AFTERNOON"; in 17..21 -> "GOOD EVENING"; else -> "WELCOME BACK" }
+        val txt = "$g, $userTag"
+        val chars = (age / 35).toInt().coerceAtMost(txt.length)
+        val fade = if (age > 2600) 1f - (age - 2600) / 600f else 1f
+        label.textAlign = Paint.Align.CENTER; label.textSize = unit * 0.85f; label.letterSpacing = 0.35f
+        val y = cy - coreR * 1.55f
+        textGlowL.textSize = label.textSize; textGlowL.letterSpacing = 0.35f; textGlowL.color = cyan((180 * fade).toInt())
+        val shown = txt.substring(0, chars)
+        c.drawText(shown, cx, y, textGlowL)
+        label.color = cyan((255 * fade).toInt()); c.drawText(shown, cx, y, label)
+        label.letterSpacing = 0f; label.color = CYAN
+        postInvalidateOnAnimation()
+    }
+
+    private val textGlowL = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        typeface = Typeface.create("sans-serif-condensed", Typeface.BOLD); textAlign = Paint.Align.CENTER
+        maskFilter = BlurMaskFilter(14f, BlurMaskFilter.Blur.NORMAL)
+    }
 
     private fun drawBootLog(c: Canvas, nowMs: Long) {
         val age = nowMs - bootStart
@@ -954,6 +1193,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
         }
 
         drawGlobe(c, hr * 0.8f, t)
+        drawSatellites(c, hr * 0.8f, t)
         // ③ voice pulse
         if (speakEnv > 0.02f) {
             for (k in 0 until 3) {
