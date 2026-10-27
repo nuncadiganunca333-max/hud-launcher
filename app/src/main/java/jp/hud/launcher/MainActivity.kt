@@ -111,6 +111,12 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
         root.addView(drawer, FrameLayout.LayoutParams(-1, -1))
         SoundFx.init(this)
         initTts()
+        // 前回ミュートしたまま終了していたら元に戻す
+        prefs.getString("mutedStreams", null)?.split(",")?.mapNotNull { it.toIntOrNull() }?.let { list ->
+            val am = getSystemService(AUDIO_SERVICE) as AudioManager
+            list.forEach { st -> try { am.adjustStreamVolume(st, AudioManager.ADJUST_UNMUTE, 0) } catch (e: Exception) { } }
+            prefs.edit().remove("mutedStreams").apply()
+        }
         val bf = IntentFilter().apply {
             addAction(android.bluetooth.BluetoothDevice.ACTION_ACL_CONNECTED); addAction(android.bluetooth.BluetoothDevice.ACTION_ACL_DISCONNECTED)
         }
@@ -178,6 +184,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
     }
 
     override fun onDestroy() {
+        handler.removeCallbacks(unmuteRunner); muteBeeps(false)
         try { unregisterReceiver(btReceiver) } catch (e: Exception) { }
         wakeRec?.destroy()
         stopSpeech(); reverb?.release()
@@ -187,7 +194,9 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
 
     override fun onPause() {
         super.onPause()
-        handler.removeCallbacks(unmuteRunner); muteBeeps(false)
+        // 聞き取りを止めると終了音が鳴るので、ミュートしたまま止めてから少し後に戻す
+        val wasListening = beepMuted || wakeActive || sessionActive || alert.listening
+        if (wasListening) muteBeeps(true)
         glBg.paused = true
         face?.stop()
         if (scan.isShowing) scan.close()
@@ -201,8 +210,11 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
         handler.removeCallbacks(statsLoop)
         NotifService.sink = null
         stopSpeech()
+        try { wakeRec?.cancel() } catch (e: Exception) { }
         recognizer?.destroy(); recognizer = null
+        sessionActive = false
         assistant.close()
+        if (wasListening) unmuteLater(2500)
     }
 
     private var talkRequested = false
@@ -647,11 +659,13 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
             for (st in streams) try {
                 if (!am.isStreamMute(st)) { am.adjustStreamVolume(st, AudioManager.ADJUST_MUTE, 0); mutedStreams += st }
             } catch (e: Exception) { }
+            prefs.edit().putString("mutedStreams", mutedStreams.joinToString(",")).apply()
         } else {
             if (!beepMuted) return
             beepMuted = false
             for (st in mutedStreams) try { am.adjustStreamVolume(st, AudioManager.ADJUST_UNMUTE, 0) } catch (e: Exception) { }
             mutedStreams.clear()
+            prefs.edit().remove("mutedStreams").apply()
         }
     }
 
