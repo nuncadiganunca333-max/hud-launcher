@@ -9,8 +9,9 @@ android {
         applicationId = "jp.hud.launcher"
         minSdk = 30
         targetSdk = 35
-        versionCode = 26
-        versionName = "11.1"
+        ndk { abiFilters += listOf("arm64-v8a") }
+        versionCode = 27
+        versionName = "11.2"
     }
     signingConfigs {
         create("fixed") {
@@ -41,6 +42,6 @@ dependencies {
     implementation("androidx.camera:camera-lifecycle:$camerax")
     implementation("androidx.camera:camera-view:$camerax")
     implementation("androidx.lifecycle:lifecycle-runtime:2.6.2")
-    implementation("com.google.mlkit:face-detection:16.1.7")
+    implementation("com.google.android.gms:play-services-mlkit-face-detection:17.1.0")
     implementation("com.google.mlkit:object-detection:17.0.2")
 }
