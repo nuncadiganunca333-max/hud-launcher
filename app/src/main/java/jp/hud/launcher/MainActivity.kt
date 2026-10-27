@@ -6,6 +6,7 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -43,7 +44,7 @@ data class AppEntry(val label: String, val pkg: String, val cls: String) {
     val key get() = "$pkg/$cls"
 }
 
-class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, AssistantOverlay.Listener, DriveView.Listener {
+class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, AssistantOverlay.Listener, DriveView.Listener, ScanOverlay.Listener {
 
     private val CYAN = Color.rgb(0, 229, 255)
     private lateinit var hud: HudView
@@ -57,6 +58,12 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
     private lateinit var alert: AlertOverlay
     private lateinit var assistant: AssistantOverlay
     private lateinit var drive: DriveView
+    private lateinit var glBg: GLBackground
+    private lateinit var scan: ScanOverlay
+    private val camOwner = CamOwner()
+    private var face: FaceWatcher? = null
+    private var faceGoneAt = 0L
+    private var faceSeenAt = 0L
     private var recognizer: android.speech.SpeechRecognizer? = null
     private val agent = ClaudeAgent("")
     private val recentNotifs = ArrayDeque<NotifItem>()
@@ -84,7 +91,9 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
         window.setDecorFitsSystemWindows(false)
 
         val root = FrameLayout(this)
-        hud = HudView(this).also { it.listener = this }
+        glBg = GLBackground(this)
+        root.addView(glBg, FrameLayout.LayoutParams(-1, -1))
+        hud = HudView(this).also { it.listener = this; it.gl = glBg }
         root.addView(hud, FrameLayout.LayoutParams(-1, -1))
         moduleFrame = FrameLayout(this)
         root.addView(moduleFrame, FrameLayout.LayoutParams(-1, -1))
@@ -94,6 +103,8 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
         assistant = AssistantOverlay(this).also { it.listener = this }
         drive = DriveView(this).also { it.listener = this }
         root.addView(drive, FrameLayout.LayoutParams(-1, -1))
+        scan = ScanOverlay(this, camOwner).also { it.listener = this }
+        root.addView(scan, FrameLayout.LayoutParams(-1, -1))
         root.addView(alert, FrameLayout.LayoutParams(-1, -1))
         root.addView(assistant, FrameLayout.LayoutParams(-1, -1))
         drawer = buildDrawer()
@@ -120,6 +131,9 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
         hud.start()
         handler.post(statsLoop)
         hud.wake()
+        glBg.paused = false
+        camOwner.resume()
+        startFace()
         applyKeepScreen()
         startVisualizer()
         val enabled = notifAccessEnabled()
@@ -130,6 +144,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
             askNotifAccess()
         }
         resumed = true
+        resumedAt = System.currentTimeMillis()
         if (notifAccessEnabled()) {
             // まだ聞いていない許可をまとめて1回だけ確認（位置・マイク・Bluetooth）
             val need = ArrayList<String>()
@@ -143,6 +158,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
             ask(android.Manifest.permission.READ_CALENDAR, "askedCal")
             ask(android.Manifest.permission.READ_CONTACTS, "askedContacts")
             ask(android.Manifest.permission.CALL_PHONE, "askedCall")
+            ask(android.Manifest.permission.CAMERA, "askedCam")
             if (Build.VERSION.SDK_INT >= 31) ask(android.Manifest.permission.BLUETOOTH_CONNECT, "askedBt")
             if (need.isNotEmpty()) requestPermissions(need.toTypedArray(), REQ_LOC)
         }
@@ -171,6 +187,10 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
 
     override fun onPause() {
         super.onPause()
+        glBg.paused = true
+        face?.stop()
+        if (scan.isShowing) scan.close()
+        camOwner.pause()
         resumed = false
         stopWake()
         stopVisualizer()
@@ -198,6 +218,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
         if (assistant.isShowing) { onAssistantClose(); return }
+        if (scan.isShowing) { onScanClose(); return }
         if (alert.isShowing) alert.listener?.let { onAlertDismiss(alertQueue.firstOrNull() ?: return) }
         else if (drawer.visibility == View.VISIBLE) closeDrawer()
     }
@@ -819,6 +840,129 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
             }.show()
     }
 
+    // ---------- memory ----------
+    private fun memories(): List<String> = try {
+        val a = org.json.JSONArray(prefs.getString("memories", "[]")); (0 until a.length()).map { a.getString(it) }
+    } catch (e: Exception) { emptyList() }
+    private fun saveMemories(list: List<String>) = prefs.edit().putString("memories", org.json.JSONArray(list).toString()).apply()
+
+    private fun showMemories() {
+        val list = memories()
+        if (list.isEmpty()) { toast("${aiName()}はまだ何も覚えていません"); return }
+        val checked = BooleanArray(list.size)
+        AlertDialog.Builder(this).setTitle("${aiName()}が覚えていること（チェックして削除）")
+            .setMultiChoiceItems(list.toTypedArray(), checked) { _, i, c -> checked[i] = c }
+            .setPositiveButton("チェックを削除") { _, _ -> saveMemories(list.filterIndexed { i, _ -> !checked[i] }); toast("削除しました") }
+            .setNegativeButton("閉じる", null).show()
+    }
+
+    // ---------- face ----------
+    private fun startFace() {
+        if (!prefs.getBoolean("faceOn", true) || scan.isShowing) return
+        if (checkSelfPermission(android.Manifest.permission.CAMERA) != android.content.pm.PackageManager.PERMISSION_GRANTED) return
+        val f = face ?: FaceWatcher(this, camOwner) { present -> onFace(present) }.also { face = it }
+        faceGoneAt = System.currentTimeMillis()
+        f.start()
+    }
+
+    private fun onFace(present: Boolean) {
+        val now = System.currentTimeMillis()
+        if (present) {
+            val away = now - faceGoneAt
+            faceSeenAt = now
+            hud.wake(); applyKeepScreen()
+            // しばらく離れていた後に顔が戻ってきたら「本人確認」演出
+            if (away > 20_000 && now - bootStartMs() > 4000) {
+                hud.faceGreet()
+                val lastVoice = prefs.getLong("faceVoiceAt", 0)
+                if (away > 5 * 60_000 && now - lastVoice > 30 * 60_000 && canSpeakProactive()) {
+                    prefs.edit().putLong("faceVoiceAt", now).apply()
+                    speakOut("おかえりなさいませ、${callName()}。", "drive")
+                }
+            }
+        } else faceGoneAt = now
+    }
+
+    private var resumedAt = 0L
+    private fun bootStartMs() = resumedAt
+
+    // ---------- scan ----------
+    override fun onScan() = openScan(null)
+
+    private var scanQuestion: String? = null
+    private fun openScan(question: String?) {
+        if (checkSelfPermission(android.Manifest.permission.CAMERA) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(arrayOf(android.Manifest.permission.CAMERA), REQ_CAM); return
+        }
+        if (apiKey().isEmpty()) { askApiKey(); return }
+        stopWake(); face?.stop(); closeDrawer()
+        scan.open()
+        scanQuestion = question
+        if (!question.isNullOrBlank()) handler.postDelayed({ if (scan.isShowing) scan.grab()?.let { onScanAnalyze(it, question) } }, 1600)
+    }
+
+    override fun onScanClose() {
+        stopSpeech(); recognizer?.cancel()
+        scan.close()
+        startFace()
+    }
+
+    override fun onScanAnalyze(frame: Bitmap, question: String?) {
+        scan.state = ScanOverlay.State.ANALYZING
+        stopSpeech()
+        val q = question?.takeIf { it.isNotBlank() } ?: "これは何ですか？見えているものを特定し、役立つ情報をひとつ添えて答えてください。"
+        val sys = systemPrompt() + "\nいまカメラのスキャンモードです。画像を見て、執事らしく2〜3文で簡潔に答えてください。商品やラベルの文字が読めれば活用してください。"
+        thread {
+            val out = try {
+                val scaled = scaleDown(frame, 1024)
+                val bos = java.io.ByteArrayOutputStream(); scaled.compress(Bitmap.CompressFormat.JPEG, 82, bos)
+                agent.apiKey = apiKey()
+                agent.vision(android.util.Base64.encodeToString(bos.toByteArray(), android.util.Base64.NO_WRAP), q, sys)
+            } catch (e: ClaudeAgent.ApiError) { "ERR:" + e.message }
+            runOnUiThread {
+                if (!scan.isShowing) return@runOnUiThread
+                scan.state = ScanOverlay.State.RESULT
+                if (out.startsWith("ERR:")) scan.result = out.removePrefix("ERR:")
+                else { scan.result = out; speakOut(out, "scan") }
+            }
+        }
+    }
+
+    private fun scaleDown(b: Bitmap, maxSide: Int): Bitmap {
+        val m = maxOf(b.width, b.height); if (m <= maxSide) return b
+        val s = maxSide.toFloat() / m
+        return Bitmap.createScaledBitmap(b, (b.width * s).toInt(), (b.height * s).toInt(), true)
+    }
+
+    override fun onScanAsk() {
+        stopSpeech()
+        if (!android.speech.SpeechRecognizer.isRecognitionAvailable(this)) return
+        recognizer?.destroy()
+        val r = makeRecognizer(); recognizer = r
+        scan.heard = ""; scan.state = ScanOverlay.State.LISTENING
+        r.setRecognitionListener(object : android.speech.RecognitionListener {
+            override fun onReadyForSpeech(p: Bundle?) {}
+            override fun onBeginningOfSpeech() {}
+            override fun onRmsChanged(rms: Float) {}
+            override fun onBufferReceived(b: ByteArray?) {}
+            override fun onEndOfSpeech() {}
+            override fun onEvent(t: Int, b: Bundle?) {}
+            override fun onPartialResults(b: Bundle?) { b?.getStringArrayList(android.speech.SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.let { scan.heard = it } }
+            override fun onError(error: Int) { recognizer?.destroy(); recognizer = null; if (scan.isShowing) scan.state = ScanOverlay.State.LIVE }
+            override fun onResults(b: Bundle?) {
+                val q = b?.getStringArrayList(android.speech.SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull().orEmpty()
+                if (!scan.isShowing) return
+                if (q.isBlank()) { scan.state = ScanOverlay.State.LIVE; return }
+                scan.heard = q
+                scan.grab()?.let { onScanAnalyze(it, q) }
+            }
+        })
+        r.startListening(Intent(android.speech.RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+            .putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE_MODEL, android.speech.RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            .putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE, "ja-JP")
+            .putExtra(android.speech.RecognizerIntent.EXTRA_PARTIAL_RESULTS, true))
+    }
+
     // ---------- proactive (アトラスから話しかける) ----------
     private var rainProb: List<Int> = emptyList()
     private val announced = HashSet<String>()
@@ -928,7 +1072,8 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
                 "アシスタントの名前（いま：${aiName()}）",
                 "呼びかけ起動：${arrayOf("開いて10秒", "10秒＋充電・運転中", "OFF")[prefs.getInt("wakeMode2", 0)]}",
                 "ドライブモードの車を設定", "ドライブモードを試す",
-                "声のサービス：${if (useEleven()) "ElevenLabs" else "スマホ"}")) { _, w ->
+                "声のサービス：${if (useEleven()) "ElevenLabs" else "スマホ"}",
+                "顔認識：${if (prefs.getBoolean("faceOn", true)) "ON" else "OFF"}", "${aiName()}が覚えていること", "スキャンモード")) { _, w ->
                 when (w) {
                     0 -> askApiKey(); 1 -> askName(); 2 -> if (useEleven()) pickElevenVoice() else pickVoice(); 3 -> tuneVoice()
                     4 -> AlertDialog.Builder(this).setTitle("声の加工")
@@ -949,6 +1094,10 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
                         }.show()
                     12 -> pickCar()
                     13 -> { driveDismissed = false; enterDrive("TEST") }
+                    14 -> { val v = !prefs.getBoolean("faceOn", true); prefs.edit().putBoolean("faceOn", v).apply()
+                            if (v) startFace() else face?.stop(); toast(if (v) "顔認識をONにしました" else "顔認識をOFFにしました") }
+                    15 -> showMemories()
+                    16 -> openScan(null)
                     14 -> AlertDialog.Builder(this).setTitle("声のサービス")
                         .setItems(arrayOf("ElevenLabs（高品質・要APIキー）", "スマホの読み上げ（無料・オフラインでも可）")) { _, which ->
                             if (which == 0) setupEleven() else { prefs.edit().putString("ttsProvider", "device").apply(); toast("スマホの声に戻しました") }
@@ -1107,6 +1256,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
     private var driveDismissed = false
     private var speedListener: android.location.LocationListener? = null
     private val REQ_BT = 53
+    private val REQ_CAM = 55
     private val REQ_FINE = 54
 
     private fun btGranted() = Build.VERSION.SDK_INT < 31 ||
@@ -1226,6 +1376,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == REQ_LOC) { lastWeather = 0; fetchWeather(); checkCarConnected(); startVisualizer(); startWake(800); return }
+        if (requestCode == REQ_CAM) { if (grantResults.firstOrNull() == android.content.pm.PackageManager.PERMISSION_GRANTED) openScan(scanQuestion); return }
         if (requestCode == REQ_BT) { if (btGranted()) { checkCarConnected(); pickCar() }; return }
         if (requestCode == REQ_FINE) { if (drive.isShowing) startSpeed(); return }
         if (requestCode == REQ_MIC) {
@@ -1348,7 +1499,10 @@ ${if (drive.isShowing) "現在${callName()}は運転中です。返答はとく�
 再生中：$media
 最近の通知：
 $notifs
-インストール済みアプリ：$appNames"""
+インストール済みアプリ：$appNames
+【あなたが覚えていること】
+${memories().ifEmpty { listOf("（まだなし）") }.joinToString("\n") { "・$it" }}
+相手が好み・習慣・家族や仕事のこと・覚えてほしいことを話したら、rememberで短く覚えておくこと（機密情報は除く）。覚えたことは会話に自然に活かすこと。"""
     }
 
     private fun think(text: String) {
@@ -1459,6 +1613,20 @@ $notifs
                     safeStart(Intent(if (canCall) Intent.ACTION_CALL else Intent.ACTION_DIAL, android.net.Uri.parse("tel:" + hit.second)))
                 }, 1800) }
                 "${hit.first}さんに発信します"
+            }
+            "camera_scan" -> {
+                val q = input.optString("question")
+                ui { handler.postDelayed({ sessionActive = false; recognizer?.cancel(); assistant.close(); openScan(q) }, 1300) }
+                "スキャンモードを開きます"
+            }
+            "remember" -> {
+                val f = input.optString("fact").trim()
+                if (f.isEmpty()) "覚える内容が空です" else { saveMemories((memories().filter { it != f } + f).takeLast(60)); "覚えました：$f" }
+            }
+            "forget" -> {
+                val k = input.optString("keyword")
+                val before = memories(); val after = before.filterNot { it.contains(k) }
+                saveMemories(after); if (after.size == before.size) "該当する記憶はありません" else "${before.size - after.size}件忘れました"
             }
             "open_notification" -> {
                 val n = recentNotifs.toList().getOrNull(input.optInt("index") - 1) ?: return "その番号の通知はありません"
@@ -1732,6 +1900,10 @@ $notifs
             updateTalkHint()
             if (wakeActive && !wakeAllowed()) stopWake()
             if (tick % 60 == 30) proactiveTick()
+            face?.let { f ->
+                if (f.running && !f.present && System.currentTimeMillis() - faceGoneAt > 15_000 && !assistant.isShowing && !drive.isShowing) hud.idleNow()
+                if (f.running && f.present) hud.wake()
+            }
             if (prefs.getInt("screenOn", 0) == 0 && !s.charging && !drive.isShowing && !assistant.isShowing &&
                 System.currentTimeMillis() - hud.lastTouchAt > 180_000) {
                 window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)

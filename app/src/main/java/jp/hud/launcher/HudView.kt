@@ -66,6 +66,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
         fun onModuleRect(r: RectF)
         fun onModuleEdit()
         fun onPanelsAlpha(a: Float)
+        fun onScan()
         fun onUserActivity()
     }
 
@@ -87,6 +88,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
     private var chargeOn = false
     var thinking = false
     var userTag = "YUDAI"
+    var gl: GLBackground? = null
     // ---- external inputs for effects ----
     var geoLat = 35.02; var geoLon = 138.48
     var speaking = false          // assistant voice output
@@ -282,10 +284,12 @@ class HudView(context: Context) : View(context), SensorEventListener {
 
     // ======================= STATIC LAYERS =======================
     private fun drawBackground(c: Canvas, x0: Float, y0: Float, x1: Float, y1: Float) {
-        fill.color = Color.WHITE; fill.shader = RadialGradient(cx, cy, max(x1 - x0, y1 - y0) * 0.8f,
-            intArrayOf(Color.rgb(8, 46, 76), Color.rgb(3, 18, 34), Color.rgb(1, 5, 11)),
-            floatArrayOf(0f, 0.5f, 1f), Shader.TileMode.CLAMP)
-        c.drawRect(x0, y0, x1, y1, fill); fill.shader = null
+        if (gl == null) {
+            fill.color = Color.WHITE; fill.shader = RadialGradient(cx, cy, max(x1 - x0, y1 - y0) * 0.8f,
+                intArrayOf(Color.rgb(8, 46, 76), Color.rgb(3, 18, 34), Color.rgb(1, 5, 11)),
+                floatArrayOf(0f, 0.5f, 1f), Shader.TileMode.CLAMP)
+            c.drawRect(x0, y0, x1, y1, fill); fill.shader = null
+        }
 
         stroke.strokeWidth = 1f
         var i = 0; var x = x0
@@ -413,6 +417,20 @@ class HudView(context: Context) : View(context), SensorEventListener {
         dX = px + sin(t * 0.45f) * unit * 0.55f
         dY = py + cos(t * 0.37f) * unit * 0.4f
 
+        gl?.let { g ->
+            val e = ease(idleP)
+            val sc = 1f + 0.12f * e
+            g.coreX = cx + dX * 0.5f + (width / 2f - cx) * e
+            g.coreY = cy + dY * 0.5f + (height / 2f - cy) * e
+            g.coreR = coreR * sc
+            g.globeR = coreR * 0.42f * sc
+            g.horizon = cy + dY * 0.5f + coreR * 1.38f + (height / 2f - cy) * e
+            g.tiltX = dX / unit * 0.1f; g.tiltY = dY / unit * 0.1f
+            g.pulse = speakEnv
+            g.dim = ease(idleP)
+            g.pinLat = geoLat; g.pinLon = geoLon
+            g.fps = when { idleP > 0.9f -> 12; lowPower -> 20; else -> 30 }
+        }
         // burn-in protection: slow pixel drift of the whole scene
         c.save()
         c.translate(sin(t / 60f) * 4f, cos(t / 47f) * 4f)
@@ -492,6 +510,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
         drawChargeFx(c, nowMs)
         drawLowBattery(c, t)
         drawGreeting(c, nowMs)
+        drawFaceGreet(c, nowMs)
         drawExpanded(c, t, now, nowMs)
         drawFlash(c)
         val sy = ((t * 0.1f) % 1f) * height
@@ -918,6 +937,36 @@ class HudView(context: Context) : View(context), SensorEventListener {
     }
 
     /** 起動ログのあとに挨拶 */
+    private var faceGreetAt = 0L
+    fun faceGreet() { faceGreetAt = System.currentTimeMillis(); wake(); invalidate() }
+    fun idleNow() { lastTouch = System.currentTimeMillis() - idleTimeoutMs - 1 }
+
+    /** 顔を認識した瞬間の「本人確認」演出 */
+    private fun drawFaceGreet(c: Canvas, nowMs: Long) {
+        val age = nowMs - faceGreetAt
+        if (faceGreetAt == 0L || age > 2600) return
+        val p = age / 2600f
+        val sweep = ease((p / 0.4f).coerceIn(0f, 1f))
+        val y = height * sweep
+        if (p < 0.45f) {
+            fill.color = Color.WHITE
+            fill.shader = LinearGradient(0f, y - unit * 5, 0f, y, Color.TRANSPARENT, cyan(90), Shader.TileMode.CLAMP)
+            c.drawRect(0f, y - unit * 5, width.toFloat(), y, fill); fill.shader = null
+            glow.strokeWidth = 14f; glow.color = cyan(200); c.drawLine(0f, y, width.toFloat(), y, glow)
+            stroke.strokeWidth = 2.5f; stroke.color = Color.WHITE; c.drawLine(0f, y, width.toFloat(), y, stroke)
+        }
+        val fade = if (p > 0.8f) (1 - p) / 0.2f else ((p - 0.3f) / 0.15f).coerceIn(0f, 1f)
+        if (fade > 0f) {
+            val l1 = "IDENTITY CONFIRMED"; val l2 = "WELCOME BACK, $userTag"
+            label.textAlign = Paint.Align.CENTER; label.letterSpacing = 0.4f
+            val ty = cy - coreR * 1.5f
+            label.textSize = unit * 0.45f; label.color = cyan((200 * fade).toInt()); c.drawText(l1, cx, ty - unit * 0.9f, label)
+            label.textSize = unit * 0.8f; label.color = cyan((255 * fade).toInt()); c.drawText(l2, cx, ty, label)
+            label.letterSpacing = 0f; label.color = CYAN
+        }
+        postInvalidateOnAnimation()
+    }
+
     private fun drawGreeting(c: Canvas, nowMs: Long) {
         val age = nowMs - bootStart - 1500
         if (age < 0 || age > 3200) return
@@ -1072,13 +1121,14 @@ class HudView(context: Context) : View(context), SensorEventListener {
     }
 
     // ---------- core / radial launcher ----------
-    private class Seg(val app: AppEntry?, val isApps: Boolean)
+    private class Seg(val app: AppEntry?, val isApps: Boolean, val isScan: Boolean = false)
 
     private fun segments(): List<Seg> {
         val list = ArrayList<Seg>()
-        dock.take(7).forEach { list += Seg(it, false) }
+        dock.take(6).forEach { list += Seg(it, false) }
+        list += Seg(null, false, true)
         list += Seg(null, true)
-        while (list.size < 6) list.add(list.size - 1, Seg(null, false))
+        while (list.size < 6) list.add(list.size - 2, Seg(null, false))
         return list
     }
 
@@ -1143,13 +1193,13 @@ class HudView(context: Context) : View(context), SensorEventListener {
             val p = Path()
             p.arcTo(outer, a0, sweep, true); p.arcTo(inner, a0 + sweep, -sweep); p.close()
             val near = 1f - min(1f, abs(hl - i).let { min(it, n - it) })
-            val active = sg.app != null || sg.isApps
+            val active = sg.app != null || sg.isApps || sg.isScan
             fill.color = Color.WHITE; fill.shader = RadialGradient(cx, cy, r2, intArrayOf(cyan(0), cyan(if (sg.isApps) 70 else if (active) 35 else 10), cyan(if (sg.isApps) 120 else if (active) (55 + 60 * near).toInt() else 18)),
                 floatArrayOf(0f, r1 / r2, 1f), Shader.TileMode.CLAMP)
             c.drawPath(p, fill); fill.shader = null
             if (active) { glow.strokeWidth = 6f; glow.color = cyan((60 + 80 * near).toInt()); c.drawPath(p, glow) }
             stroke.strokeWidth = 2f; stroke.color = cyan(if (active) 200 else 70); c.drawPath(p, stroke)
-            val text = when { sg.isApps -> "APPS"; sg.app != null -> sg.app.label.uppercase(); else -> "+" }
+            val text = when { sg.isApps -> "APPS"; sg.isScan -> "◎ SCAN"; sg.app != null -> sg.app.label.uppercase(); else -> "+" }
             label.textSize = (r2 - r1) * (if (active) 0.30f else 0.4f); label.textAlign = Paint.Align.LEFT; label.letterSpacing = 0.08f
             label.color = if (active) CYAN else cyan(70)
             val center = (a0 + sweep / 2 + 360f) % 360f
@@ -1212,8 +1262,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
             c.drawCircle(cx + hr * cos(a).toFloat(), cy + hr * sin(a).toFloat(), unit * 0.1f, fill)
         }
 
-        drawGlobe(c, hr * 0.8f, t)
-        drawSatellites(c, hr * 0.8f, t)
+        if (gl?.ready != true) { drawGlobe(c, hr * 0.8f, t); drawSatellites(c, hr * 0.8f, t) }
         // ③ voice pulse
         if (speakEnv > 0.02f) {
             for (k in 0 until 3) {
@@ -1723,6 +1772,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
         if (y < topStrip.bottom + unit * 0.5f && x < width * 0.5f) { SoundFx.play(SoundFx.Fx.TAP); listener?.onTopStripTap(); return }
         segmentAt(x, y)?.let { s ->
             when {
+                s.isScan -> { SoundFx.play(SoundFx.Fx.OPEN); listener?.onScan() }
                 s.isApps || s.app == null -> { SoundFx.play(SoundFx.Fx.OPEN); listener?.onOpenDrawer() }
                 else -> {
                     SoundFx.play(SoundFx.Fx.OPEN)

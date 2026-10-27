@@ -9,8 +9,8 @@ android {
         applicationId = "jp.hud.launcher"
         minSdk = 30
         targetSdk = 35
-        versionCode = 24
-        versionName = "10.0"
+        versionCode = 25
+        versionName = "11.0"
     }
     signingConfigs {
         create("fixed") {
@@ -32,4 +32,15 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     kotlinOptions { jvmTarget = "17" }
+}
+
+dependencies {
+    val camerax = "1.3.4"
+    implementation("androidx.camera:camera-core:$camerax")
+    implementation("androidx.camera:camera-camera2:$camerax")
+    implementation("androidx.camera:camera-lifecycle:$camerax")
+    implementation("androidx.camera:camera-view:$camerax")
+    implementation("androidx.lifecycle:lifecycle-runtime:2.6.2")
+    implementation("com.google.mlkit:face-detection:16.1.7")
+    implementation("com.google.mlkit:object-detection:17.0.2")
 }
