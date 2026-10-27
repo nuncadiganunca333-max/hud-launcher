@@ -53,12 +53,17 @@ class FaceWatcher(private val ctx: Context, private val owner: LifecycleOwner, p
         Cam.withProvider(ctx) { p ->
             if (!running) return@withProvider
             @Suppress("DEPRECATION")
-            val a = ImageAnalysis.Builder().setTargetResolution(Size(320, 240))
-                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST).build()
+            val b = ImageAnalysis.Builder().setTargetResolution(Size(320, 240))
+                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+            try {
+                androidx.camera.camera2.interop.Camera2Interop.Extender(b).setCaptureRequestOption(
+                    android.hardware.camera2.CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, android.util.Range(5, 8))
+            } catch (e: Throwable) { }
+            val a = b.build()
             a.setAnalyzer(exec) { img ->
                 val now = System.currentTimeMillis()
                 val media = img.image
-                if (now - lastRun < 1000 || media == null) { img.close(); return@setAnalyzer }
+                if (now - lastRun < 1500 || media == null) { img.close(); return@setAnalyzer }
                 lastRun = now
                 val input = InputImage.fromMediaImage(media, img.imageInfo.rotationDegrees)
                 detector.process(input)

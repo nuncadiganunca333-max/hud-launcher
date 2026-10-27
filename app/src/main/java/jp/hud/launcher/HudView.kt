@@ -164,7 +164,12 @@ class HudView(context: Context) : View(context), SensorEventListener {
 
     // ---- paints ----
     private val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
-    private val glow = Paint(Paint.ANTI_ALIAS_FLAG).apply { blendMode = BlendMode.PLUS;
+    // 毎フレームのぼかし処理は重いので、太く薄い加算の線で光を表現する
+    private val glow = Paint(Paint.ANTI_ALIAS_FLAG).apply { blendMode = BlendMode.PLUS
+        style = Paint.Style.STROKE; strokeCap = Paint.Cap.ROUND; strokeJoin = Paint.Join.ROUND
+        colorFilter = ColorMatrixColorFilter(ColorMatrix(floatArrayOf(1f, 0f, 0f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 0f, 0f, 0.32f, 0f)))
+    }
+    private val glowStatic = Paint(Paint.ANTI_ALIAS_FLAG).apply { blendMode = BlendMode.PLUS
         style = Paint.Style.STROKE; maskFilter = BlurMaskFilter(16f, BlurMaskFilter.Blur.NORMAL)
     }
     private val fill = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -178,7 +183,8 @@ class HudView(context: Context) : View(context), SensorEventListener {
         color = CYAN; typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
     }
     private val monoGlow = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD); maskFilter = BlurMaskFilter(12f, BlurMaskFilter.Blur.NORMAL)
+        typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD); style = Paint.Style.STROKE; strokeWidth = 6f; blendMode = BlendMode.PLUS
+        colorFilter = ColorMatrixColorFilter(ColorMatrix(floatArrayOf(1f, 0f, 0f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 0f, 0f, 0.3f, 0f)))
     }
     private val thin = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = CYAN; typeface = Typeface.create("sans-serif-thin", Typeface.NORMAL); textAlign = Paint.Align.CENTER
@@ -352,7 +358,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
         val shape = chamfer(r, k)
         fill.color = Color.WHITE; fill.shader = LinearGradient(0f, r.top, 0f, r.bottom, Color.argb(195, 4, 26, 44), Color.argb(215, 1, 10, 20), Shader.TileMode.CLAMP)
         c.drawPath(shape, fill); fill.shader = null
-        glow.strokeWidth = 6f; glow.color = cyan(60); c.drawPath(shape, glow)
+        glowStatic.strokeWidth = 6f; glowStatic.color = cyan(60); c.drawPath(shape, glowStatic)
         stroke.strokeWidth = 1.4f; stroke.color = cyan(150); c.drawPath(shape, stroke)
         val inset = RectF(r.left + 6, r.top + 6, r.right - 6, r.bottom - 6)
         stroke.strokeWidth = 0.8f; stroke.color = cyan(35); c.drawPath(chamfer(inset, k * 0.8f), stroke)
@@ -381,9 +387,9 @@ class HudView(context: Context) : View(context), SensorEventListener {
         stroke.strokeWidth = 3f; stroke.color = Color.argb(255, 210, 245, 255)
         c.drawLine(r.left, r.top + k, r.left + k, r.top, stroke)
         c.drawLine(r.right - k, r.bottom, r.right, r.bottom - k, stroke)
-        glow.strokeWidth = 10f; glow.color = cyan(160)
-        c.drawLine(r.left, r.top + k, r.left + k, r.top, glow)
-        c.drawLine(r.right - k, r.bottom, r.right, r.bottom - k, glow)
+        glowStatic.strokeWidth = 10f; glowStatic.color = cyan(160)
+        c.drawLine(r.left, r.top + k, r.left + k, r.top, glowStatic)
+        c.drawLine(r.right - k, r.bottom, r.right, r.bottom - k, glowStatic)
     }
 
     // ======================= FRAME =======================
@@ -429,7 +435,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
             g.pulse = speakEnv
             g.dim = ease(idleP)
             g.pinLat = geoLat; g.pinLon = geoLon
-            g.fps = when { idleP > 0.9f -> 12; lowPower -> 20; else -> 30 }
+            g.fps = when { idleP > 0.9f -> 10; lowPower -> 18; else -> 24 }
         }
         // burn-in protection: slow pixel drift of the whole scene
         c.save()
@@ -532,7 +538,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
 
         if (running) {
             val anim = boot < 1f || expanded != null || ripples.isNotEmpty() || nowMs - incomingAt < 800 || abs(idleP - idleTarget) > 0.01f
-            when { anim -> postInvalidateOnAnimation(); idleP > 0.9f -> postInvalidateDelayed(if (lowPower) 160 else 66); else -> postInvalidateDelayed(if (lowPower) 50 else 33) }
+            when { anim -> postInvalidateOnAnimation(); idleP > 0.9f -> postInvalidateDelayed(if (lowPower) 160 else 66); else -> postInvalidateDelayed(if (lowPower) 60 else 40) }
         }
     }
 
@@ -547,7 +553,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
 
     // ===== ⑩ data rain =====
     private fun drawDataRain(c: Canvas, t: Float) {
-        val cols = if (wide) 26 else 14
+        val cols = if (wide) 12 else 7
         mono.textAlign = Paint.Align.CENTER; mono.textSize = unit * 0.42f
         val step = mono.textSize * 1.25f
         for (k in 0 until cols) {
@@ -987,7 +993,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
 
     private val textGlowL = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         typeface = Typeface.create("sans-serif-condensed", Typeface.BOLD); textAlign = Paint.Align.CENTER
-        maskFilter = BlurMaskFilter(14f, BlurMaskFilter.Blur.NORMAL)
+        style = Paint.Style.STROKE; strokeWidth = 6f
     }
 
     private fun drawBootLog(c: Canvas, nowMs: Long) {
@@ -1244,8 +1250,8 @@ class HudView(context: Context) : View(context), SensorEventListener {
         // layered hexagon core (near layer, with shadow)
         val hr = coreR * 0.5f
         c.save(); c.translate(dX * 0.35f + unit * 0.2f, dY * 0.35f + unit * 0.5f)
-        fill.color = Color.argb(150, 0, 0, 0); fill.maskFilter = BlurMaskFilter(unit * 0.8f, BlurMaskFilter.Blur.NORMAL)
-        c.drawPath(hexPath(hr, t * 6f), fill); fill.maskFilter = null
+        fill.color = Color.argb(110, 0, 0, 0)
+        c.drawPath(hexPath(hr * 1.04f, t * 6f), fill)
         c.restore()
         c.save(); c.translate(-dX * 0.2f, -dY * 0.2f)
         fill.color = Color.WHITE; fill.shader = RadialGradient(cx, cy, hr, intArrayOf(cyan(80), cyan(20), cyan(0)), floatArrayOf(0f, 0.7f, 1f), Shader.TileMode.CLAMP)

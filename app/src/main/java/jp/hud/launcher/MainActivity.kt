@@ -187,6 +187,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
 
     override fun onPause() {
         super.onPause()
+        handler.removeCallbacks(unmuteRunner); muteBeeps(false)
         glBg.paused = true
         face?.stop()
         if (scan.isShowing) scan.close()
@@ -299,7 +300,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
         if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) != android.content.pm.PackageManager.PERMISSION_GRANTED) return
         if (!android.speech.SpeechRecognizer.isRecognitionAvailable(this)) return
         recognizer?.destroy()
-        val r = android.speech.SpeechRecognizer.createSpeechRecognizer(this); recognizer = r
+        val r = makeRecognizer(); recognizer = r
         alert.listening = true
         r.setRecognitionListener(object : android.speech.RecognitionListener {
             override fun onReadyForSpeech(p: Bundle?) {}
@@ -307,11 +308,12 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
             override fun onRmsChanged(rms: Float) { alert.micLevel = ((rms + 2f) / 12f).coerceIn(0f, 1f); hud.voiceLevel = alert.micLevel * 0.6f }
             override fun onBufferReceived(b: ByteArray?) {}
             override fun onEndOfSpeech() { alert.micLevel = 0f }
-            override fun onError(error: Int) { alert.listening = false; startWake(600) }
+            override fun onError(error: Int) { alert.listening = false; unmuteLater(); startWake(600) }
             override fun onPartialResults(b: Bundle?) {}
             override fun onEvent(t: Int, b: Bundle?) {}
             override fun onResults(b: Bundle?) {
                 alert.listening = false
+                unmuteLater()
                 startWake(800)
                 val all = b?.getStringArrayList(android.speech.SpeechRecognizer.RESULTS_RECOGNITION)?.joinToString(" ")?.lowercase().orEmpty()
                 if (!alert.isShowing || alertQueue.firstOrNull()?.key != n.key) return
@@ -321,6 +323,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
                 }
             }
         })
+        muteBeeps(true)
         r.startListening(Intent(android.speech.RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
             .putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE_MODEL, android.speech.RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             .putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE, "ja-JP")
@@ -616,7 +619,35 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
     /** 読み上げ。エフェクトONなら一度ファイルに合成して残響をかけて再生 */
     private var speakSeq = 0
 
+    // 音声認識の開始・終了の「ピコッ」というシステム音を消す（聞き取り中だけ通知音などをミュート）
+    private var beepMuted = false
+    private val mutedStreams = ArrayList<Int>()
+    private val unmuteRunner = Runnable { muteBeeps(false) }
+
+    private fun muteBeeps(on: Boolean) {
+        val am = getSystemService(AUDIO_SERVICE) as AudioManager
+        if (on) {
+            handler.removeCallbacks(unmuteRunner)
+            if (beepMuted) return
+            beepMuted = true; mutedStreams.clear()
+            val streams = mutableListOf(AudioManager.STREAM_NOTIFICATION, AudioManager.STREAM_SYSTEM)
+            if (!am.isMusicActive) streams += AudioManager.STREAM_MUSIC   // 音楽再生中は止めない
+            for (st in streams) try {
+                if (!am.isStreamMute(st)) { am.adjustStreamVolume(st, AudioManager.ADJUST_MUTE, 0); mutedStreams += st }
+            } catch (e: Exception) { }
+        } else {
+            if (!beepMuted) return
+            beepMuted = false
+            for (st in mutedStreams) try { am.adjustStreamVolume(st, AudioManager.ADJUST_UNMUTE, 0) } catch (e: Exception) { }
+            mutedStreams.clear()
+        }
+    }
+
+    /** 終了音が鳴り終わるまで少し待ってから戻す */
+    private fun unmuteLater(ms: Long = 700) { handler.removeCallbacks(unmuteRunner); handler.postDelayed(unmuteRunner, ms) }
+
     private fun speakOut(text: String, id: String) {
+        handler.removeCallbacks(unmuteRunner); muteBeeps(false)
         if (useEleven()) {
             stopSpeech(); stopWake(); hud.speaking = true
             val seq = ++speakSeq
@@ -948,7 +979,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
             override fun onEndOfSpeech() {}
             override fun onEvent(t: Int, b: Bundle?) {}
             override fun onPartialResults(b: Bundle?) { b?.getStringArrayList(android.speech.SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.let { scan.heard = it } }
-            override fun onError(error: Int) { recognizer?.destroy(); recognizer = null; if (scan.isShowing) scan.state = ScanOverlay.State.LIVE }
+            override fun onError(error: Int) { unmuteLater(); recognizer?.destroy(); recognizer = null; if (scan.isShowing) scan.state = ScanOverlay.State.LIVE }
             override fun onResults(b: Bundle?) {
                 val q = b?.getStringArrayList(android.speech.SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull().orEmpty()
                 if (!scan.isShowing) return
@@ -957,6 +988,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
                 scan.grab()?.let { onScanAnalyze(it, q) }
             }
         })
+        muteBeeps(true)
         r.startListening(Intent(android.speech.RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
             .putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE_MODEL, android.speech.RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             .putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE, "ja-JP")
@@ -1227,7 +1259,8 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
                     return true
                 }
             })
-            r.startListening(Intent(android.speech.RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+            muteBeeps(true)
+        r.startListening(Intent(android.speech.RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
                 .putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE_MODEL, android.speech.RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
                 .putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE, "ja-JP")
                 .putExtra(android.speech.RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
@@ -1238,6 +1271,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
     private fun stopWake() {
         handler.removeCallbacks(wakeRunner)
         try { wakeRec?.cancel() } catch (e: Exception) { }
+        if (wakeActive && !sessionActive && !alert.listening) unmuteLater()
         wakeActive = false
     }
 
@@ -1404,6 +1438,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
     }
 
     private fun endSession(farewell: Boolean) {
+        unmuteLater()
         sessionActive = false
         recognizer?.cancel()
         if (farewell && ttsReady) {
@@ -1461,7 +1496,8 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
             override fun onEvent(t: Int, b: Bundle?) {}
         })
         try {
-            r.startListening(Intent(android.speech.RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+            muteBeeps(true)
+        r.startListening(Intent(android.speech.RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
                 .putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE_MODEL, android.speech.RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
                 .putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE, "ja-JP")
                 .putExtra(android.speech.RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
@@ -1642,6 +1678,7 @@ ${memories().ifEmpty { listOf("（まだなし）") }.joinToString("\n") { "・$
     private fun endSessionQuiet() { sessionActive = false }
 
     override fun onAssistantClose() {
+        unmuteLater()
         SoundFx.play(SoundFx.Fx.BACK)
         sessionActive = false
         recognizer?.cancel(); stopSpeech()

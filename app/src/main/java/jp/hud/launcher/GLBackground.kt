@@ -34,7 +34,7 @@ class GLBackground(context: Context) : TextureView(context), TextureView.Surface
     @Volatile var tiltX = 0f
     @Volatile var tiltY = 0f
     @Volatile var pulse = 0f
-    @Volatile var fps = 30
+    @Volatile var fps = 24
     @Volatile var paused = false
     @Volatile var dim = 0f
     @Volatile var pinLat = 35.02
@@ -45,10 +45,16 @@ class GLBackground(context: Context) : TextureView(context), TextureView.Surface
 
     init { surfaceTextureListener = this; isOpaque = true }
 
+    /** 背景は柔らかい絵なので、内部解像度を下げて描いて拡大する（GPU負荷を約1/3に） */
+    private val SCALE = 0.55f
+
     override fun onSurfaceTextureAvailable(st: SurfaceTexture, w: Int, h: Int) {
+        st.setDefaultBufferSize((w * SCALE).toInt(), (h * SCALE).toInt())
         thread = RenderThread(st, w, h).also { it.start() }
     }
-    override fun onSurfaceTextureSizeChanged(st: SurfaceTexture, w: Int, h: Int) { thread?.resize(w, h) }
+    override fun onSurfaceTextureSizeChanged(st: SurfaceTexture, w: Int, h: Int) {
+        st.setDefaultBufferSize((w * SCALE).toInt(), (h * SCALE).toInt()); thread?.resize(w, h)
+    }
     override fun onSurfaceTextureDestroyed(st: SurfaceTexture): Boolean {
         thread?.quit(); try { thread?.join(500) } catch (e: Exception) { }
         thread = null; ready = false
@@ -74,7 +80,7 @@ class GLBackground(context: Context) : TextureView(context), TextureView.Surface
                 while (running) {
                     val frameStart = System.nanoTime()
                     if (!paused) {
-                        GLES20.glViewport(0, 0, w, h)
+                        GLES20.glViewport(0, 0, (w * SCALE).toInt(), (h * SCALE).toInt())
                         drawFrame((frameStart - t0) / 1e9f)
                         EGL14.eglSwapBuffers(display, surf)
                     }
@@ -258,7 +264,7 @@ class GLBackground(context: Context) : TextureView(context), TextureView.Surface
             lineBuf.position(0); lineBuf.put(linePts, 0, n * 2); lineBuf.position(0)
             GLES20.glVertexAttribPointer(attr, 2, GLES20.GL_FLOAT, false, 0, lineBuf)
             GLES20.glUniform4f(GLES20.glGetUniformLocation(lineProg, "uColor"), r * a, g * a, b * a, 1f)
-            uni1(lineProg, "uSize", size)
+            uni1(lineProg, "uSize", size * SCALE)
             uni1(lineProg, "uPoint", if (mode == GLES20.GL_POINTS) 1f else 0f)
             GLES20.glLineWidth(2f)
             GLES20.glDrawArrays(mode, 0, n)
