@@ -389,7 +389,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
         if (keys.remove(app.key)) {
             toast("リングから外しました：${app.label}")
         } else {
-            if (keys.size >= 7) { toast("リングに登録できるのは7個までです"); return }
+            if (keys.size >= 10) { toast("リングに登録できるのは10個までです"); return }
             keys += app.key; toast("リングに登録：${app.label}")
         }
         saveDock(keys); refreshDock()
@@ -411,8 +411,20 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
     }
 
     // ---------- module (hosted app widget, e.g. Tesla) ----------
-    override fun onStart() { super.onStart(); try { widgetHost.startListening() } catch (e: Exception) { } }
-    override fun onStop() { super.onStop(); try { widgetHost.stopListening() } catch (e: Exception) { } }
+    override fun onStart() {
+        super.onStart(); try { widgetHost.startListening() } catch (e: Exception) { }
+        try {
+            windowTracker = androidx.window.java.layout.WindowInfoTrackerCallbackAdapter(androidx.window.layout.WindowInfoTracker.getOrCreate(this))
+            windowTracker?.addWindowLayoutInfoListener(this, mainExecutor, layoutConsumer)
+        } catch (e: Throwable) { }
+        (getSystemService(DISPLAY_SERVICE) as android.hardware.display.DisplayManager).registerDisplayListener(displayListener, handler)
+        updateExternal()
+    }
+    override fun onStop() {
+        super.onStop(); try { widgetHost.stopListening() } catch (e: Exception) { }
+        try { windowTracker?.removeWindowLayoutInfoListener(layoutConsumer) } catch (e: Throwable) { }
+        (getSystemService(DISPLAY_SERVICE) as android.hardware.display.DisplayManager).unregisterDisplayListener(displayListener)
+    }
 
     override fun onModuleRect(r: android.graphics.RectF) { moduleRect = android.graphics.RectF(r); placeWidget() }
 
@@ -630,7 +642,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
             handler.removeCallbacks(unmuteRunner)
             if (beepMuted) return
             beepMuted = true; mutedStreams.clear()
-            val streams = mutableListOf(AudioManager.STREAM_NOTIFICATION, AudioManager.STREAM_SYSTEM)
+            val streams = mutableListOf(AudioManager.STREAM_NOTIFICATION, AudioManager.STREAM_SYSTEM, AudioManager.STREAM_ACCESSIBILITY)
             if (!am.isMusicActive) streams += AudioManager.STREAM_MUSIC   // 音楽再生中は止めない
             for (st in streams) try {
                 if (!am.isStreamMute(st)) { am.adjustStreamVolume(st, AudioManager.ADJUST_MUTE, 0); mutedStreams += st }
@@ -644,7 +656,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
     }
 
     /** 終了音が鳴り終わるまで少し待ってから戻す */
-    private fun unmuteLater(ms: Long = 700) { handler.removeCallbacks(unmuteRunner); handler.postDelayed(unmuteRunner, ms) }
+    private fun unmuteLater(ms: Long = 2200) { handler.removeCallbacks(unmuteRunner); handler.postDelayed(unmuteRunner, ms) }
 
     private fun speakOut(text: String, id: String) {
         handler.removeCallbacks(unmuteRunner); muteBeeps(false)
@@ -888,12 +900,71 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
     }
 
     // ---------- face ----------
+    /** 手のジェスチャーを使うか（既定：充電中かワークショップモードのときだけ） */
+    private fun gesturesWanted(): Boolean = when (prefs.getInt("gestureMode", 0)) {
+        1 -> true; 2 -> false; else -> hud.stats.charging || hud.workshop
+    }
+
     private fun startFace() {
-        if (!prefs.getBoolean("faceOn", true) || scan.isShowing) return
+        val faceOn = prefs.getBoolean("faceOn", true)
+        val g = gesturesWanted()
+        if ((!faceOn && !g) || scan.isShowing || !resumed) { face?.stop(); return }
         if (checkSelfPermission(android.Manifest.permission.CAMERA) != android.content.pm.PackageManager.PERMISSION_GRANTED) return
-        val f = face ?: FaceWatcher(this, camOwner) { present -> onFace(present) }.also { face = it }
-        faceGoneAt = System.currentTimeMillis()
-        f.start()
+        val f = face ?: FaceWatcher(this, camOwner) { present -> if (prefs.getBoolean("faceOn", true)) onFace(present) }.also { face = it }
+        f.onSwipe = { dir -> if (!assistant.isShowing && !alert.isShowing && !drive.isShowing) { closeDrawer(); hud.airSwipe(dir) } }
+        f.onCover = {
+            if (!assistant.isShowing && !scan.isShowing) {
+                try { (getSystemService(VIBRATOR_MANAGER_SERVICE) as android.os.VibratorManager).defaultVibrator
+                    .vibrate(android.os.VibrationEffect.createPredefined(android.os.VibrationEffect.EFFECT_CLICK)) } catch (e: Exception) { }
+                startAssistant()
+            }
+        }
+        if (!f.running) faceGoneAt = System.currentTimeMillis()
+        f.start(g)
+    }
+
+    // ---------- workshop mode (Foldを半分に折る) ----------
+    private var windowTracker: androidx.window.java.layout.WindowInfoTrackerCallbackAdapter? = null
+    private val layoutConsumer = androidx.core.util.Consumer<androidx.window.layout.WindowLayoutInfo> { info ->
+        val fold = info.displayFeatures.filterIsInstance<androidx.window.layout.FoldingFeature>().firstOrNull()
+        val table = fold != null && fold.state == androidx.window.layout.FoldingFeature.State.HALF_OPENED &&
+            fold.orientation == androidx.window.layout.FoldingFeature.Orientation.HORIZONTAL
+        val was = hud.workshop
+        if (table) {
+            val loc = IntArray(2); hud.getLocationInWindow(loc)
+            hud.setHinge((fold!!.bounds.centerY() - loc[1]).toFloat())
+        } else hud.setHinge(-1f)
+        if (hud.workshop != was) {
+            if (hud.workshop && canSpeakProactive()) speakOut("ワークショップモードに切り替えます。", "drive")
+            startFace()
+        }
+    }
+
+    // ---------- external display ----------
+    private var extHud: ExternalHud? = null
+    private val displayListener = object : android.hardware.display.DisplayManager.DisplayListener {
+        override fun onDisplayAdded(id: Int) = updateExternal()
+        override fun onDisplayRemoved(id: Int) = updateExternal()
+        override fun onDisplayChanged(id: Int) {}
+    }
+
+    private fun updateExternal() {
+        val dm = getSystemService(DISPLAY_SERVICE) as android.hardware.display.DisplayManager
+        val d = dm.getDisplays(android.hardware.display.DisplayManager.DISPLAY_CATEGORY_PRESENTATION).firstOrNull()
+        if (!prefs.getBoolean("extOn", true) || d == null) { extHud?.dismiss(); extHud = null; return }
+        if (extHud?.display?.displayId == d.displayId) return
+        extHud?.dismiss()
+        extHud = try { ExternalHud(this, d).also { it.show(); syncExternal() } } catch (e: Exception) { null }
+    }
+
+    private fun syncExternal() {
+        val e = extHud ?: return
+        if (!e.isShowing) return
+        try {
+            e.hud.stats = hud.stats; e.hud.media = hud.media; e.hud.dock = hud.dock
+            e.hud.geoLat = hud.geoLat; e.hud.geoLon = hud.geoLon; e.hud.userTag = hud.userTag
+            e.hud.notifLink = hud.notifLink; e.hud.speaking = hud.speaking; e.hud.thinking = hud.thinking
+        } catch (ex: Exception) { }
     }
 
     private fun onFace(present: Boolean) {
@@ -1105,7 +1176,8 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
                 "呼びかけ起動：${arrayOf("開いて10秒", "10秒＋充電・運転中", "OFF")[prefs.getInt("wakeMode2", 0)]}",
                 "ドライブモードの車を設定", "ドライブモードを試す",
                 "声のサービス：${if (useEleven()) "ElevenLabs" else "スマホ"}",
-                "顔認識：${if (prefs.getBoolean("faceOn", true)) "ON" else "OFF"}", "${aiName()}が覚えていること", "スキャンモード")) { _, w ->
+                "顔認識：${if (prefs.getBoolean("faceOn", true)) "ON" else "OFF"}", "${aiName()}が覚えていること", "スキャンモード",
+                "手のジェスチャー：${arrayOf("充電中・ワークショップ時", "常に", "OFF")[prefs.getInt("gestureMode", 0)]}", "外部ディスプレイ表示：${if (prefs.getBoolean("extOn", true)) "ON" else "OFF"}", "パネルの並びを元に戻す")) { _, w ->
                 when (w) {
                     0 -> askApiKey(); 1 -> askName(); 2 -> if (useEleven()) pickElevenVoice() else pickVoice(); 3 -> tuneVoice()
                     4 -> AlertDialog.Builder(this).setTitle("声の加工")
@@ -1127,9 +1199,15 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
                     12 -> pickCar()
                     13 -> { driveDismissed = false; enterDrive("TEST") }
                     15 -> { val v = !prefs.getBoolean("faceOn", true); prefs.edit().putBoolean("faceOn", v).apply()
-                            if (v) startFace() else face?.stop(); toast(if (v) "顔認識をONにしました" else "顔認識をOFFにしました") }
+                            startFace(); toast(if (v) "顔認識をONにしました" else "顔認識をOFFにしました") }
                     16 -> showMemories()
                     17 -> openScan(null)
+                    18 -> AlertDialog.Builder(this).setTitle("手のジェスチャー")
+                        .setSingleChoiceItems(arrayOf("充電中・ワークショップモードのときだけ（おすすめ）", "常に使う（電池を使います）", "OFF"), prefs.getInt("gestureMode", 0)) { d, which ->
+                            prefs.edit().putInt("gestureMode", which).apply(); d.dismiss(); startFace()
+                        }.show()
+                    19 -> { val v = !prefs.getBoolean("extOn", true); prefs.edit().putBoolean("extOn", v).apply(); updateExternal() }
+                    20 -> { prefs.edit().remove("order:wide").remove("order:narrow").remove("order:ws").apply(); recreate() }
                     14 -> AlertDialog.Builder(this).setTitle("声のサービス")
                         .setItems(arrayOf("ElevenLabs（高品質・要APIキー）", "スマホの読み上げ（無料・オフラインでも可）")) { _, which ->
                             if (which == 0) setupEleven() else { prefs.edit().putString("ttsProvider", "device").apply(); toast("スマホの声に戻しました") }
@@ -1932,6 +2010,8 @@ ${memories().ifEmpty { listOf("（まだなし）") }.joinToString("\n") { "・$
             s.rxHist = rxHist.toList(); s.txHist = txHist.toList()
             s.memHist = memHist.toList(); s.battHist = battHist.toList()
             hud.stats = s
+            syncExternal()
+            if (tick % 5 == 0 && resumed && !scan.isShowing && face?.let { it.running && it.gestures != gesturesWanted() } == true) startFace()
             drive.stats = s
             hud.lowPower = !s.charging
             updateTalkHint()

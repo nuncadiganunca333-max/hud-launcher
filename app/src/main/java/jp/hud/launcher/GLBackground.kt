@@ -40,6 +40,8 @@ class GLBackground(context: Context) : TextureView(context), TextureView.Surface
     @Volatile var pinLat = 35.02
     @Volatile var pinLon = 138.48
     @Volatile var ready = false
+    @Volatile var userAX = 0f
+    @Volatile var userAY = 0f
 
     private var thread: RenderThread? = null
 
@@ -198,8 +200,8 @@ class GLBackground(context: Context) : TextureView(context), TextureView.Surface
             // ---- globe (additive)
             GLES20.glEnable(GLES20.GL_BLEND)
             GLES20.glBlendFunc(GLES20.GL_ONE, GLES20.GL_ONE)
-            val ax = 0.38f + tiltY * 0.25f
-            val ay = t * 0.21f + tiltX * 0.3f
+            val ax = 0.38f + tiltY * 0.25f + userAX
+            val ay = t * 0.21f + tiltX * 0.3f + userAY
             buildRot(ax, ay)
             GLES20.glUseProgram(globeProg)
             GLES20.glUniformMatrix3fv(GLES20.glGetUniformLocation(globeProg, "uRot"), 1, false, rot, 0)

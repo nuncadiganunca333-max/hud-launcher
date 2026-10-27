@@ -89,6 +89,24 @@ class HudView(context: Context) : View(context), SensorEventListener {
     var thinking = false
     var userTag = "YUDAI"
     var gl: GLBackground? = null
+    var interactive = true           // 外部ディスプレイ用はタッチ無効
+    // ワークショップモード（ヒンジ位置。-1 で通常）
+    var hingeY = -1f
+        private set
+    val workshop get() = hingeY > 0f && wide
+    fun setHinge(y: Float) {
+        if (abs(y - hingeY) < 1f) return
+        hingeY = y; bootStart = System.currentTimeMillis(); expanded = null
+        if (width > 0) relayout(width, height)
+    }
+    // 指で操作するホログラム
+    private var globeAX = 0f; private var globeAY = 0f
+    private var globeVX = 0f; private var globeVY = 0f
+    private var globeZoom = 1f
+    private var downInCore = false
+    private var dragging = false
+    private val swapFx = HashMap<String, Long>()
+    private var swipeFxAt = 0L; private var swipeDir = 0
     // ---- external inputs for effects ----
     var geoLat = 35.02; var geoLon = 138.48
     var speaking = false          // assistant voice output
@@ -195,11 +213,44 @@ class HudView(context: Context) : View(context), SensorEventListener {
     }
     private val layerPaint = Paint()
 
+    private val scaler = android.view.ScaleGestureDetector(context, object : android.view.ScaleGestureDetector.SimpleOnScaleGestureListener() {
+        override fun onScale(d: android.view.ScaleGestureDetector): Boolean {
+            globeZoom = (globeZoom * d.scaleFactor).coerceIn(0.6f, 2.4f); invalidate(); return true
+        }
+    })
+
+    private fun inCore(x: Float, y: Float) = hypot(x - cx - dX * 0.3f, y - cy - dY * 0.3f) < coreR * 0.55f
+
     private val gestures = GestureDetector(context, object : GestureDetector.SimpleOnGestureListener() {
-        override fun onDown(e: MotionEvent) = true
-        override fun onSingleTapUp(e: MotionEvent): Boolean { tap(e.x, e.y); return true }
+        override fun onDown(e: MotionEvent): Boolean { downInCore = inCore(e.x, e.y); dragging = false; globeVX = 0f; globeVY = 0f; return true }
+        override fun onScroll(e1: MotionEvent?, e2: MotionEvent, dx: Float, dy: Float): Boolean {
+            if (!downInCore) return false
+            dragging = true
+            val k = 1f / (coreR * 0.42f)
+            globeAY -= dx * k; globeAX = (globeAX - dy * k).coerceIn(-1.2f, 1.2f)
+            globeVY = -dx * k * 0.6f; globeVX = -dy * k * 0.6f
+            invalidate(); return true
+        }
+        override fun onDoubleTap(e: MotionEvent): Boolean {
+            if (inCore(e.x, e.y)) { globeZoom = 1f; globeAX = 0f; globeVX = 0f; globeVY = 0.08f; invalidate(); return true }
+            return false
+        }
+        // コア（地球儀）はダブルタップと区別するため確定後に処理
+        override fun onSingleTapUp(e: MotionEvent): Boolean { if (!inCore(e.x, e.y)) tap(e.x, e.y); return true }
+        override fun onSingleTapConfirmed(e: MotionEvent): Boolean { if (inCore(e.x, e.y)) tap(e.x, e.y); return true }
         override fun onLongPress(e: MotionEvent) { longPress(e.x, e.y) }
         override fun onFling(e1: MotionEvent?, e2: MotionEvent, vx: Float, vy: Float): Boolean {
+            if (downInCore) {
+                val k = 1f / (coreR * 0.42f) / 60f
+                globeVY = (vx * k).coerceIn(-0.4f, 0.4f); globeVX = (vy * k).coerceIn(-0.2f, 0.2f)
+                dragging = false; invalidate(); return true
+            }
+            val start = e1 ?: return false
+            val panel = panels.entries.firstOrNull { it.key != "MODULE" && it.value.contains(start.x, start.y) }?.key
+            if (panel != null && max(abs(vx), abs(vy)) > 1500) {
+                if (abs(vx) > abs(vy)) flingPanel(panel, if (vx > 0) 1 else -1, 0) else flingPanel(panel, 0, if (vy > 0) 1 else -1)
+                return true
+            }
             if (vy < -1200 && abs(vy) > abs(vx)) { SoundFx.play(SoundFx.Fx.OPEN); listener?.onOpenDrawer(); return true }
             return false
         }
@@ -244,7 +295,27 @@ class HudView(context: Context) : View(context), SensorEventListener {
         val top = topStrip.bottom + unit * 0.8f
         val bottom = H - insetBottom - unit * 0.6f
 
-        if (wide) {
+        if (workshop) {
+            // 上：ホログラム（コア＋左右のパネル）／下：操作コンソール
+            val hy = hingeY
+            val upBottom = hy - unit * 1.2f
+            val lowTop = hy + unit * 1.2f
+            val sideW = W * 0.24f
+            panels["SYSTEM"] = RectF(m, top, m + sideW, upBottom)
+            panels["WEATHER"] = RectF(W - m - sideW, top, W - m, upBottom)
+            cx = W / 2; cy = top + (upBottom - top) * 0.5f
+            coreR = min((W - sideW * 2) * 0.36f, (upBottom - top) * 0.42f)
+            val lh = bottom - lowTop
+            val cw = (W - m * 2 - gap * 3) / 4
+            fun col(i: Int, span: Int = 1) = m + i * (cw + gap) to m + i * (cw + gap) + cw * span + gap * (span - 1)
+            val r1b = lowTop + lh * 0.5f - gap / 2; val r2t = lowTop + lh * 0.5f + gap / 2
+            col(0).let { (a, b) -> panels["CALENDAR"] = RectF(a, lowTop, b, r1b) }
+            col(1).let { (a, b) -> panels["MEDIA"] = RectF(a, lowTop, b, r1b) }
+            col(2).let { (a, b) -> panels["POWER"] = RectF(a, lowTop, b, r1b) }
+            col(3).let { (a, b) -> panels["MODULE"] = RectF(a, lowTop, b, bottom) }
+            col(0, 3).let { (a, b) -> panels["NETWORK"] = RectF(a, r2t, b, bottom) }
+            statusStrip.setEmpty()
+        } else if (wide) {
             val colBottom = top + (bottom - top) * 0.78f
             val lx2 = W * 0.255f; val rx1 = W * 0.745f
             val lh = colBottom - top
@@ -275,6 +346,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
             panels["MODULE"] = RectF(m, r2 + gap / 2, W - m, bottom)
             statusStrip.setEmpty()
         }
+        applySavedOrder()
         bgLayer?.recycle(); fgLayer?.recycle()
         bgMargin = (unit * 1.6f).toInt()
         bgLayer = Bitmap.createBitmap(w + bgMargin * 2, h + bgMargin * 2, Bitmap.Config.ARGB_8888).also {
@@ -395,6 +467,80 @@ class HudView(context: Context) : View(context), SensorEventListener {
     // ======================= FRAME =======================
     private fun ease(p: Float) = 1f - (1f - p.coerceIn(0f, 1f)).pow(3)
 
+    private fun layoutKey() = if (workshop) "ws" else if (wide) "wide" else "narrow"
+    private val prefsH by lazy { context.getSharedPreferences("hud", Context.MODE_PRIVATE) }
+
+    /** パネルの並び（指で入れ替えた順）を反映。MODULE（ウィジェット）は固定 */
+    private fun applySavedOrder() {
+        val names = panels.keys.filter { it != "MODULE" }
+        val saved = prefsH.getString("order:" + layoutKey(), null)?.split(",") ?: return
+        if (saved.size != names.size || saved.toSet() != names.toSet()) return
+        val slots = names.map { RectF(panels[it]) }
+        saved.forEachIndexed { i, n -> panels[n] = slots[i] }
+    }
+
+    private fun currentOrder(): MutableList<String> {
+        val names = panels.keys.filter { it != "MODULE" }
+        val saved = prefsH.getString("order:" + layoutKey(), null)?.split(",")
+        return if (saved != null && saved.toSet() == names.toSet()) saved.toMutableList() else names.toMutableList()
+    }
+
+    private fun swapPanels(a: String, b: String) {
+        // 既定の並びで slot を求め直してから入れ替える
+        val order = currentOrder()
+        val ia = order.indexOf(a); val ib = order.indexOf(b)
+        if (ia < 0 || ib < 0) return
+        order[ia] = b; order[ib] = a
+        prefsH.edit().putString("order:" + layoutKey(), order.joinToString(",")).apply()
+        val now = System.currentTimeMillis()
+        swapFx[a] = now; swapFx[b] = now
+        relayout(width, height)
+    }
+
+    private fun flingPanel(from: String, dirX: Int, dirY: Int) {
+        val r = panels[from] ?: return
+        val cands = panels.filter { it.key != from && it.key != "MODULE" }
+        val target = cands.minByOrNull { (_, o) ->
+            val dx = o.centerX() - r.centerX(); val dy = o.centerY() - r.centerY()
+            val along = dx * dirX + dy * dirY
+            if (along <= unit) Float.MAX_VALUE else along + abs(if (dirX != 0) dy else dx) * 2f
+        } ?: return
+        val dx = target.value.centerX() - r.centerX(); val dy = target.value.centerY() - r.centerY()
+        if (dx * dirX + dy * dirY <= unit) return
+        SoundFx.play(SoundFx.Fx.OPEN)
+        swapPanels(from, target.key)
+    }
+
+    /** 手のジェスチャー（空中スワイプ）：パネルを順に全画面で表示 */
+    fun airSwipe(dir: Int) {
+        wake()
+        swipeFxAt = System.currentTimeMillis(); swipeDir = dir
+        val order = currentOrder()
+        if (order.isEmpty()) return
+        val cur = expanded
+        val next = if (cur == null) order[if (dir > 0) 0 else order.lastIndex]
+            else order[((order.indexOf(cur) + dir) % order.size + order.size) % order.size]
+        expanded = next; expandAt = System.currentTimeMillis(); collapsing = false
+        invalidate()
+    }
+
+    fun closeExpanded() { if (expanded != null) collapse() }
+
+    private fun drawSwipeFx(c: Canvas, nowMs: Long) {
+        val age = nowMs - swipeFxAt
+        if (swipeFxAt == 0L || age > 500) return
+        val p = ease(age / 500f)
+        val y = height * 0.5f
+        val x = if (swipeDir > 0) width * (-0.2f + 1.4f * p) else width * (1.2f - 1.4f * p)
+        val len = width * 0.35f
+        val x2 = x - swipeDir * len
+        fill.color = Color.WHITE
+        fill.shader = LinearGradient(x2, 0f, x, 0f, Color.TRANSPARENT, cyan(120), Shader.TileMode.CLAMP)
+        c.drawRect(min(x, x2), y - unit * 3, max(x, x2), y + unit * 3, fill); fill.shader = null
+        stroke.strokeWidth = 3f; stroke.color = Color.WHITE; c.drawLine(x, y - unit * 3, x, y + unit * 3, stroke)
+        postInvalidateOnAnimation()
+    }
+
     fun incoming() { incomingAt = System.currentTimeMillis(); wake(); invalidate() }
 
     fun wake() { lastTouch = System.currentTimeMillis() }
@@ -429,8 +575,11 @@ class HudView(context: Context) : View(context), SensorEventListener {
             g.coreX = cx + dX * 0.5f + (width / 2f - cx) * e
             g.coreY = cy + dY * 0.5f + (height / 2f - cy) * e
             g.coreR = coreR * sc
-            g.globeR = coreR * 0.42f * sc
-            g.horizon = cy + dY * 0.5f + coreR * 1.38f + (height / 2f - cy) * e
+            if (!dragging) { globeAY += globeVY; globeAX += globeVX; globeVY *= 0.95f; globeVX *= 0.92f; globeAX *= 0.985f }
+            if (abs(globeVX) > 0.0005f || abs(globeVY) > 0.0005f) postInvalidateOnAnimation()
+            g.userAX = globeAX; g.userAY = globeAY
+            g.globeR = coreR * 0.42f * sc * globeZoom
+            g.horizon = if (workshop) hingeY else cy + dY * 0.5f + coreR * 1.38f + (height / 2f - cy) * e
             g.tiltX = dX / unit * 0.1f; g.tiltY = dY / unit * 0.1f
             g.pulse = speakEnv
             g.dim = ease(idleP)
@@ -484,6 +633,14 @@ class HudView(context: Context) : View(context), SensorEventListener {
             var k = 0
             for ((name, r) in panels) {
                 c.save()
+                swapFx[name]?.let { st ->
+                    val q = ((System.currentTimeMillis() - st) / 450f)
+                    if (q >= 1f) swapFx.remove(name) else {
+                        val e = ease(q)
+                        c.clipRect(r.left - unit, r.centerY() - (r.height() / 2 + unit) * e, r.right + unit, r.centerY() + (r.height() / 2 + unit) * e)
+                        postInvalidateOnAnimation()
+                    }
+                }
                 if (name != "MODULE") c.concat(panelMatrix(r))
                 drawPanelBack(c, r)
                 val pad = unit * 0.25f
@@ -517,6 +674,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
         drawLowBattery(c, t)
         drawGreeting(c, nowMs)
         drawFaceGreet(c, nowMs)
+        drawSwipeFx(c, nowMs)
         drawExpanded(c, t, now, nowMs)
         drawFlash(c)
         val sy = ((t * 0.1f) % 1f) * height
@@ -1073,8 +1231,9 @@ class HudView(context: Context) : View(context), SensorEventListener {
     private fun drawTopStrip(c: Canvas, t: Float, now: Calendar) {
         val r = topStrip; val base = r.bottom - unit * 0.4f
         label.textAlign = Paint.Align.LEFT; label.textSize = unit * 0.75f; label.letterSpacing = 0.2f; label.color = CYAN
-        c.drawText("◆ HUD//OS", r.left, base, label)
-        val lw = label.measureText("◆ HUD//OS  ")
+        val brand = if (workshop) "◆ HUD//OS  WORKSHOP" else "◆ HUD//OS"
+        c.drawText(brand, r.left, base, label)
+        val lw = label.measureText("$brand  ")
         label.textSize = unit * 0.45f
         label.color = if (notifLink) cyan(170) else RED
         val linkTxt = if (wide) {
@@ -1131,7 +1290,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
 
     private fun segments(): List<Seg> {
         val list = ArrayList<Seg>()
-        dock.take(6).forEach { list += Seg(it, false) }
+        dock.take(10).forEach { list += Seg(it, false) }
         list += Seg(null, false, true)
         list += Seg(null, true)
         while (list.size < 6) list.add(list.size - 2, Seg(null, false))
@@ -1206,7 +1365,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
             if (active) { glow.strokeWidth = 6f; glow.color = cyan((60 + 80 * near).toInt()); c.drawPath(p, glow) }
             stroke.strokeWidth = 2f; stroke.color = cyan(if (active) 200 else 70); c.drawPath(p, stroke)
             val text = when { sg.isApps -> "APPS"; sg.isScan -> "◎ SCAN"; sg.app != null -> sg.app.label.uppercase(); else -> "+" }
-            label.textSize = (r2 - r1) * (if (active) 0.30f else 0.4f); label.textAlign = Paint.Align.LEFT; label.letterSpacing = 0.08f
+            label.textSize = (r2 - r1) * (if (active) (if (n > 8) 0.25f else 0.30f) else 0.4f); label.textAlign = Paint.Align.LEFT; label.letterSpacing = 0.08f
             label.color = if (active) CYAN else cyan(70)
             val center = (a0 + sweep / 2 + 360f) % 360f
             val bottomHalf = center in 0f..180f
@@ -1746,6 +1905,10 @@ class HudView(context: Context) : View(context), SensorEventListener {
 
     // ======================= INPUT =======================
     override fun onTouchEvent(e: MotionEvent): Boolean {
+        if (!interactive) return false
+        scaler.onTouchEvent(e)
+        if (scaler.isInProgress) { lastTouch = System.currentTimeMillis(); return true }
+        if (e.actionMasked == MotionEvent.ACTION_UP || e.actionMasked == MotionEvent.ACTION_CANCEL) dragging = false
         val wasIdle = idleP > 0.3f
         if (e.action == MotionEvent.ACTION_DOWN) { lastTouch = System.currentTimeMillis(); listener?.onUserActivity(); invalidate() }
         if (wasIdle) {
