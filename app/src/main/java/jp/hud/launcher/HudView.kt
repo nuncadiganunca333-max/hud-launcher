@@ -89,7 +89,11 @@ class HudView(context: Context) : View(context), SensorEventListener {
     var thinking = false
     var userTag = "YUDAI"
     var gl: GLBackground? = null
-    var interactive = true           // 外部ディスプレイ用はタッチ無効
+    var interactive = true
+    var gestureState = 0       // 0=OFF, 1=ON, 2=ジェスチャーON, -1=エラー
+    var gestureMotion = 0f
+    private var gestureHitAt = 0L
+    fun gestureHit() { gestureHitAt = System.currentTimeMillis(); invalidate() }           // 外部ディスプレイ用はタッチ無効
     // ワークショップモード（ヒンジ位置。-1 で通常）
     var hingeY = -1f
         private set
@@ -1242,7 +1246,26 @@ class HudView(context: Context) : View(context), SensorEventListener {
             if (notifLink) "● LINK" + (if (voiceOn) " VOICE" else "") else "○ LINK (TAP)"
         }
         c.drawText(linkTxt, r.left + lw, base, label)
-        val linkW = label.measureText(linkTxt)
+        var linkW = label.measureText(linkTxt)
+        // ジェスチャーの状態
+        if (gestureState == 2 || gestureState == -1) {
+            val gx = r.left + lw + linkW + unit * 0.8f
+            val hit = System.currentTimeMillis() - gestureHitAt < 600
+            label.color = when { gestureState == -1 -> RED; hit -> Color.WHITE; else -> cyan(190) }
+            val gt = if (gestureState == -1) "GESTURE ✕" else "GESTURE"
+            c.drawText(gt, gx, base, label)
+            val gw = label.measureText(gt)
+            if (gestureState == 2) {
+                // 手の動きのメーター
+                val bw = unit * 1.6f; val bh = unit * 0.25f
+                val bx = gx + gw + unit * 0.3f; val by = base - bh * 1.6f
+                fill.color = cyan(40); c.drawRect(bx, by, bx + bw, by + bh, fill)
+                fill.color = if (hit) Color.WHITE else CYAN
+                c.drawRect(bx, by, bx + bw * (gestureMotion * 4f).coerceIn(0f, 1f), by + bh, fill)
+                linkW += gw + bw + unit * 1.2f
+            } else linkW += gw + unit * 0.8f
+            label.color = CYAN
+        }
         label.letterSpacing = 0f
         mono.textAlign = Paint.Align.RIGHT; mono.textSize = unit * 0.62f; mono.color = CYAN
         val wd = arrayOf("SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT")[now.get(Calendar.DAY_OF_WEEK) - 1]

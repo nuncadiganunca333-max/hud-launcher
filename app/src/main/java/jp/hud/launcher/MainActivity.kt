@@ -925,11 +925,16 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
         if ((!faceOn && !g) || scan.isShowing || !resumed) { face?.stop(); return }
         if (checkSelfPermission(android.Manifest.permission.CAMERA) != android.content.pm.PackageManager.PERMISSION_GRANTED) return
         val f = face ?: FaceWatcher(this, camOwner) { present -> if (prefs.getBoolean("faceOn", true)) onFace(present) }.also { face = it }
-        f.onSwipe = { dir -> if (!assistant.isShowing && !alert.isShowing && !drive.isShowing) { closeDrawer(); hud.airSwipe(dir) } }
+        f.onSwipe = { dir -> hud.gestureHit(); if (!assistant.isShowing && !alert.isShowing && !drive.isShowing) { closeDrawer(); hud.airSwipe(dir) } }
+        f.onStatus = { st, motion ->
+            hud.gestureState = when { st == -1 -> -1; st == 0 -> 0; f.gestures -> 2; else -> 1 }
+            hud.gestureMotion = motion
+        }
         f.onCover = {
             if (!assistant.isShowing && !scan.isShowing) {
                 try { (getSystemService(VIBRATOR_MANAGER_SERVICE) as android.os.VibratorManager).defaultVibrator
                     .vibrate(android.os.VibrationEffect.createPredefined(android.os.VibrationEffect.EFFECT_CLICK)) } catch (e: Exception) { }
+                hud.gestureHit()
                 startAssistant()
             }
         }

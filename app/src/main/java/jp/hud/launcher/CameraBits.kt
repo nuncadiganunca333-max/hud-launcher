@@ -44,6 +44,9 @@ object Cam {
 class FaceWatcher(private val ctx: Context, private val owner: LifecycleOwner, private val onChange: (Boolean) -> Unit) {
     var onSwipe: ((Int) -> Unit)? = null     // +1 = 右へ、-1 = 左へ（ユーザーから見た向き）
     var onCover: (() -> Unit)? = null
+    /** 状態表示用：0=停止, 1=動作中, -1=カメラエラー。motion=手の動きの量(0..1) */
+    var onStatus: ((Int, Float) -> Unit)? = null
+    private var lastStatusAt = 0L
     private var useCase: UseCase? = null
     private val exec = Executors.newSingleThreadExecutor()
     private val main = android.os.Handler(android.os.Looper.getMainLooper())
@@ -72,11 +75,13 @@ class FaceWatcher(private val ctx: Context, private val owner: LifecycleOwner, p
             @Suppress("DEPRECATION")
             val b = ImageAnalysis.Builder().setTargetResolution(Size(320, 240))
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-            try {
-                androidx.camera.camera2.interop.Camera2Interop.Extender(b).setCaptureRequestOption(
-                    android.hardware.camera2.CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
-                    if (withGestures) android.util.Range(12, 15) else android.util.Range(5, 8))
-            } catch (e: Throwable) { }
+            // カメラが対応しているコマ数の範囲から選ぶ（非対応の値を指定するとカメラが止まるため）
+            pickFps(withGestures)?.let { range ->
+                try {
+                    androidx.camera.camera2.interop.Camera2Interop.Extender(b).setCaptureRequestOption(
+                        android.hardware.camera2.CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, range)
+                } catch (e: Throwable) { }
+            }
             val a = b.build()
             a.setAnalyzer(exec) { img ->
                 val now = System.currentTimeMillis()
@@ -94,11 +99,27 @@ class FaceWatcher(private val ctx: Context, private val owner: LifecycleOwner, p
                     .addOnCompleteListener { img.close() }
             }
             try {
-                p.bindToLifecycle(owner, CameraSelector.DEFAULT_FRONT_CAMERA, a)
+                val cam = p.bindToLifecycle(owner, CameraSelector.DEFAULT_FRONT_CAMERA, a)
                 useCase = a
-            } catch (e: Exception) { running = false }
+                main.post { onStatus?.invoke(1, 0f) }
+                cam.cameraInfo.cameraState.observe(owner) { st ->
+                    if (st.error != null) main.post { onStatus?.invoke(-1, 0f) }
+                }
+            } catch (e: Exception) { running = false; main.post { onStatus?.invoke(-1, 0f) } }
         }
     }
+
+    private fun pickFps(gesture: Boolean): android.util.Range<Int>? = try {
+        val cm = ctx.getSystemService(Context.CAMERA_SERVICE) as android.hardware.camera2.CameraManager
+        val id = cm.cameraIdList.firstOrNull {
+            cm.getCameraCharacteristics(it).get(android.hardware.camera2.CameraCharacteristics.LENS_FACING) ==
+                android.hardware.camera2.CameraCharacteristics.LENS_FACING_FRONT
+        }
+        val ranges = id?.let { cm.getCameraCharacteristics(it).get(android.hardware.camera2.CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES) }
+        if (ranges.isNullOrEmpty()) null
+        else if (gesture) ranges.filter { it.upper >= 15 }.minWithOrNull(compareBy({ it.upper }, { -it.lower })) ?: ranges.maxByOrNull { it.upper }
+        else ranges.minWithOrNull(compareBy({ it.upper }, { it.lower }))
+    } catch (e: Exception) { null }
 
     private fun gesture(img: androidx.camera.core.ImageProxy, now: Long) {
         val plane = img.planes[0]
@@ -116,33 +137,38 @@ class FaceWatcher(private val ctx: Context, private val owner: LifecycleOwner, p
             }
         }
         val mean = sum / (GW * GH)
-        // --- 手でカメラを覆う
-        if (mean < 22) {
+        var varSum = 0L
+        for (v in cur) { val d = v - mean; varSum += d * d }
+        val std = kotlin.math.sqrt(varSum.toDouble() / cur.size).toFloat()
+        // --- 手でカメラを覆う：映像が暗い、または模様がなくなる（のっぺりする）
+        val covered = mean < 25 || (std < 9f && mean < 140)
+        if (covered) {
             if (coverStart == 0L) coverStart = now
-            if (now - coverStart > 1100 && now - lastBright < 5000 && now - lastGesture > 2500) {
+            if (now - coverStart > 900 && now - lastBright < 6000 && now - lastGesture > 2500) {
                 lastGesture = now; coverStart = 0L
                 main.post { onCover?.invoke() }
             }
         } else {
             coverStart = 0L
-            if (mean > 55) lastBright = now
+            if (std > 14f) lastBright = now
         }
         // --- 空中スワイプ（動いている部分の重心を追う）
         val p = prev; prev = cur
-        if (p == null || mean < 30) { track.clear(); return }
+        if (p == null || covered) { track.clear(); return }
         var cnt = 0; var sx = 0f; var sy = 0f
-        for (i in cur.indices) if (abs(cur[i] - p[i]) > 28) { cnt++; sx += (i % GW).toFloat(); sy += (i / GW).toFloat() }
+        for (i in cur.indices) if (abs(cur[i] - p[i]) > 22) { cnt++; sx += (i % GW).toFloat(); sy += (i / GW).toFloat() }
         val energy = cnt.toFloat() / (GW * GH)
-        if (energy < 0.06f) { if (track.isNotEmpty() && now - track.last().first > 300) track.clear(); return }
+        if (now - lastStatusAt > 150) { lastStatusAt = now; main.post { onStatus?.invoke(1, energy) } }
+        if (energy < 0.04f) { if (track.isNotEmpty() && now - track.last().first > 350) track.clear(); return }
         val mx = sx / cnt / (GW - 1); val my = sy / cnt / (GH - 1)
         // 画像の回転を補正して「画面の横方向」の位置にする
         val ux = when (img.imageInfo.rotationDegrees) { 90 -> 1f - my; 180 -> 1f - mx; 270 -> my; else -> mx }
         track.addLast(now to ux)
-        while (track.isNotEmpty() && now - track.first().first > 650) track.removeFirst()
+        while (track.isNotEmpty() && now - track.first().first > 800) track.removeFirst()
         if (track.size >= 3 && now - lastGesture > 900) {
             val first = track.first().second; val last = track.last().second
             val mn = track.minOf { it.second }; val mxv = track.maxOf { it.second }
-            if (abs(last - first) > 0.38f && mxv - mn > 0.4f) {
+            if (abs(last - first) > 0.28f && mxv - mn > 0.3f) {
                 lastGesture = now; track.clear()
                 // インカメラは鏡写しではない映像なので、ユーザーの右手方向は画像の左
                 val dir = if (last < first) 1 else -1
@@ -152,6 +178,7 @@ class FaceWatcher(private val ctx: Context, private val owner: LifecycleOwner, p
     }
 
     fun stop() {
+        if (running) main.post { onStatus?.invoke(0, 0f) }
         running = false
         useCase?.let { u -> try { Cam.provider?.unbind(u) } catch (e: Exception) { } }
         useCase = null
