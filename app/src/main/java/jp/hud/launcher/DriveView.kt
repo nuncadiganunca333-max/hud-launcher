@@ -22,7 +22,7 @@ class DriveView(context: Context) : View(context) {
     var media: MediaInfo? = null
     var speedKmh = -1f
     var carName = ""
-    var assistantName = "ATLAS"
+    var assistantName = "ジャービス"
     var lastNotice = ""
         set(v) { field = v; noticeAt = System.currentTimeMillis() }
     private var noticeAt = 0L

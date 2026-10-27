@@ -21,7 +21,7 @@ class AssistantOverlay(context: Context) : View(context) {
     }
 
     var listener: Listener? = null
-    var title = "ATLAS"
+    var title = "JARVIS"
     var state = State.IDLE
         set(v) { field = v; invalidate() }
     var level = 0f          // mic level 0..1

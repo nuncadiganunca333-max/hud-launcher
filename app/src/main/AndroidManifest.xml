@@ -50,7 +50,7 @@
         <activity-alias
             android:name=".TalkAlias"
             android:targetActivity=".MainActivity"
-            android:label="ATLAS（話しかける）"
+            android:label="JARVIS（話しかける）"
             android:icon="@mipmap/ic_launcher"
             android:exported="true">
             <intent-filter>

@@ -1125,7 +1125,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
 
     private fun Float.roundToIntSafe() = Math.round(this)
 
-    /** アトラスのパネルを出して読み上げ、終わったら閉じる */
+    /** アシスタントのパネルを出して読み上げ、終わったら閉じる */
     private fun announce(text: String) {
         if (!canSpeakProactive()) return
         closeDrawer()
@@ -1253,14 +1253,18 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
     }
 
     // ---------- assistant name & wake word ----------
-    private fun aiName() = prefs.getString("aiName", "アトラス") ?: "アトラス"
-    private fun aiTag(): String { val n = aiName(); return if (n == "アトラス") "ATLAS" else if (n.all { it.code < 128 }) n.uppercase() else n }
+    private fun aiName(): String {
+        val n = prefs.getString("aiName", null)
+        return if (n == null || n == "アトラス") "ジャービス" else n   // 既定はジャービス
+    }
+    private fun aiTag(): String { val n = aiName(); return when (n) { "ジャービス", "ジャーヴィス" -> "JARVIS"; "アトラス" -> "ATLAS"; else -> if (n.all { it.code < 128 }) n.uppercase() else n } }
 
     private fun kataToHira(s: String) = s.map { if (it in 'ァ'..'ヶ') (it.code - 0x60).toChar() else it }.joinToString("")
     private fun wakeWords(): List<String> {
         val n = aiName().lowercase()
         val list = mutableListOf(n, kataToHira(n), aiTag().lowercase())
-        if (n == "アトラス") list += listOf("あとらす", "atlas", "アトラス", "あとらす")
+        if (n == "アトラス") list += listOf("あとらす", "atlas", "アトラス")
+        if (n == "ジャービス" || n == "ジャーヴィス") list += listOf("ジャービス", "ジャーヴィス", "じゃーびす", "ジャビス", "じゃびす", "jarvis", "ジャーベス", "ジャービズ")
         return list.distinct().filter { it.length >= 2 }
     }
 
