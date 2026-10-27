@@ -1259,7 +1259,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
     }
 
     private fun startAssistant(initial: String? = null) {
-        if (apiKey().isEmpty()) { askApiKey(); return }
+        if (apiKey().isEmpty()) { toast("先にClaudeのAPIキーを設定してください"); askApiKey(); return }
         if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
             requestPermissions(arrayOf(android.Manifest.permission.RECORD_AUDIO), REQ_MIC); return
         }

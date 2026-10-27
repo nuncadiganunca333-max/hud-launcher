@@ -223,10 +223,19 @@ class HudView(context: Context) : View(context), SensorEventListener {
         }
     })
 
-    private fun inCore(x: Float, y: Float) = hypot(x - cx - dX * 0.3f, y - cy - dY * 0.3f) < coreR * 0.55f
+    private fun inCore(x: Float, y: Float) = hypot(x - cx - dX * 0.3f, y - cy - dY * 0.3f) < coreR * 0.72f
+    private var coreTouchAt = 0L
 
     private val gestures = GestureDetector(context, object : GestureDetector.SimpleOnGestureListener() {
-        override fun onDown(e: MotionEvent): Boolean { downInCore = inCore(e.x, e.y); dragging = false; globeVX = 0f; globeVY = 0f; return true }
+        override fun onDown(e: MotionEvent): Boolean {
+            downInCore = inCore(e.x, e.y); dragging = false
+            if (downInCore) {
+                globeVX = 0f; globeVY = 0f; coreTouchAt = System.currentTimeMillis()
+                performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
+                invalidate()
+            }
+            return true
+        }
         override fun onScroll(e1: MotionEvent?, e2: MotionEvent, dx: Float, dy: Float): Boolean {
             if (!downInCore) return false
             dragging = true
@@ -235,13 +244,8 @@ class HudView(context: Context) : View(context), SensorEventListener {
             globeVY = -dx * k * 0.6f; globeVX = -dy * k * 0.6f
             invalidate(); return true
         }
-        override fun onDoubleTap(e: MotionEvent): Boolean {
-            if (inCore(e.x, e.y)) { globeZoom = 1f; globeAX = 0f; globeVX = 0f; globeVY = 0.08f; invalidate(); return true }
-            return false
-        }
-        // コア（地球儀）はダブルタップと区別するため確定後に処理
-        override fun onSingleTapUp(e: MotionEvent): Boolean { if (!inCore(e.x, e.y)) tap(e.x, e.y); return true }
-        override fun onSingleTapConfirmed(e: MotionEvent): Boolean { if (inCore(e.x, e.y)) tap(e.x, e.y); return true }
+
+        override fun onSingleTapUp(e: MotionEvent): Boolean { tap(e.x, e.y); return true }
         override fun onLongPress(e: MotionEvent) { longPress(e.x, e.y) }
         override fun onFling(e1: MotionEvent?, e2: MotionEvent, vx: Float, vy: Float): Boolean {
             if (downInCore) {
@@ -545,6 +549,17 @@ class HudView(context: Context) : View(context), SensorEventListener {
         postInvalidateOnAnimation()
     }
 
+    private fun drawCoreTouch(c: Canvas, nowMs: Long) {
+        val age = nowMs - coreTouchAt
+        if (coreTouchAt == 0L || age > 600) return
+        val q = age / 600f
+        val x = cx + dX * 0.3f; val y = cy + dY * 0.3f
+        glow.strokeWidth = 24f; glow.color = cyan((255 * (1 - q)).toInt()); c.drawCircle(x, y, coreR * (0.45f + 0.35f * ease(q)), glow)
+        stroke.strokeWidth = 3f; stroke.color = Color.argb((255 * (1 - q)).toInt(), 220, 248, 255)
+        c.drawCircle(x, y, coreR * (0.45f + 0.35f * ease(q)), stroke)
+        postInvalidateOnAnimation()
+    }
+
     fun incoming() { incomingAt = System.currentTimeMillis(); wake(); invalidate() }
 
     fun wake() { lastTouch = System.currentTimeMillis() }
@@ -680,6 +695,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
         drawFaceGreet(c, nowMs)
         drawSwipeFx(c, nowMs)
         drawExpanded(c, t, now, nowMs)
+        drawCoreTouch(c, nowMs)
         drawFlash(c)
         val sy = ((t * 0.1f) % 1f) * height
         fill.color = Color.WHITE; fill.shader = LinearGradient(0f, sy - unit * 2, 0f, sy, Color.TRANSPARENT, cyan(22), Shader.TileMode.CLAMP)
@@ -765,7 +781,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
     // ===== ① wireframe globe =====
     private fun drawGlobe(c: Canvas, r: Float, t: Float) {
         val tilt = Math.toRadians(22.0)
-        val rot = Math.toRadians((t * 12.0) % 360.0)
+        val rot = Math.toRadians((t * 12.0) % 360.0) + globeAY
         fun proj(latD: Double, lonD: Double): FloatArray {
             val lat = Math.toRadians(latD); val lon = Math.toRadians(lonD) + rot
             val x = cos(lat) * sin(lon); val y0 = sin(lat); val z0 = cos(lat) * cos(lon)
@@ -1981,7 +1997,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
             if (mediaArt.contains(x, y)) { listener?.onMediaAction("open"); return }
             return
         }
-        if (hypot(x - cx - dX * 0.3f, y - cy - dY * 0.3f) < coreR * 0.55f) { SoundFx.play(SoundFx.Fx.LISTEN); listener?.onClockTap(); return }
+        if (inCore(x, y)) { SoundFx.play(SoundFx.Fx.LISTEN); listener?.onClockTap(); return }
         for ((name, r) in panels) if (r.contains(x, y)) {
             if (name == "MODULE") return
             SoundFx.play(SoundFx.Fx.OPEN); expand(name); return
@@ -1992,7 +2008,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
     private fun longPress(x: Float, y: Float) {
         segmentAt(x, y)?.app?.let { SoundFx.play(SoundFx.Fx.DONE); listener?.onDockLongPress(it); return }
         panels["MODULE"]?.let { if (it.contains(x, y)) { listener?.onModuleEdit(); return } }
-        if (hypot(x - cx - dX * 0.3f, y - cy - dY * 0.3f) < coreR * 0.55f) { SoundFx.play(SoundFx.Fx.TAP); listener?.onCoreLongPress(); return }
+        if (inCore(x, y)) { SoundFx.play(SoundFx.Fx.TAP); listener?.onCoreLongPress(); return }
         if (y < topStrip.bottom + unit) listener?.onHomeSettings()
     }
 }
