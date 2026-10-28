@@ -1257,7 +1257,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
         label.textSize = unit * 0.45f
         label.color = if (notifLink) cyan(170) else RED
         val linkTxt = if (wide) {
-            if (notifLink) "NOTIFY LINK ● ONLINE" + (if (voiceOn) "  VOICE ON" else "  VOICE OFF") else "NOTIFY LINK ○ OFFLINE  (TAP)"
+            if (notifLink) "NOTIFY LINK ● ONLINE" + (if (voiceOn) "  VOICE ON" else "  VOICE OFF") else "NOTIFY LINK ○ OFFLINE  (TAP TO FIX)"
         } else {
             if (notifLink) "● LINK" + (if (voiceOn) " VOICE" else "") else "○ LINK (TAP)"
         }

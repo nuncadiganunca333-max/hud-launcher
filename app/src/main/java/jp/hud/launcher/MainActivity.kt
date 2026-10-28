@@ -144,6 +144,10 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
         startVisualizer()
         val enabled = notifAccessEnabled()
         hud.notifLink = enabled
+        // アプリを更新すると通知の受け取りが切れたままになることがあるので、つなぎ直す
+        if (enabled && NotifService.instance == null) {
+            try { android.service.notification.NotificationListenerService.requestRebind(ComponentName(this, NotifService::class.java)) } catch (e: Exception) { }
+        }
         hud.voiceOn = prefs.getBoolean("voice", true)
         if (!enabled && !prefs.getBoolean("askedNotif", false)) {
             prefs.edit().putBoolean("askedNotif", true).apply()
@@ -369,7 +373,10 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
 
     override fun onTopStripTap() {
         if (!notifAccessEnabled()) askNotifAccess()
-        else {
+        else if (NotifService.instance == null) {
+            try { android.service.notification.NotificationListenerService.requestRebind(ComponentName(this, NotifService::class.java)) } catch (e: Exception) { }
+            toast("通知の受け取りをつなぎ直しています。ONLINEにならない場合は、通知へのアクセスを一度OFF→ONにしてください")
+        } else {
             val v = !prefs.getBoolean("voice", true)
             prefs.edit().putBoolean("voice", v).apply()
             hud.voiceOn = v
@@ -897,6 +904,16 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
             }.show()
     }
 
+    /** 通知の演出を試す（本物の通知と同じ流れ） */
+    private fun testNotification() {
+        val line = "jp.naver.line.android"
+        val hasLine = try { packageManager.getApplicationInfo(line, 0); true } catch (e: Exception) { false }
+        val item = NotifItem("hud-test-" + System.currentTimeMillis(), if (hasLine) line else packageName,
+            if (hasLine) "LINE" else "HUD TEST", "${aiName()}", "これは通知演出のテストです。届くとこのように表示されます。",
+            null, false, System.currentTimeMillis())
+        onNotif(item, live = true)
+    }
+
     // ---------- memory ----------
     private fun memories(): List<String> = try {
         val a = org.json.JSONArray(prefs.getString("memories", "[]")); (0 until a.length()).map { a.getString(it) }
@@ -1196,7 +1213,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
                 "ドライブモードの車を設定", "ドライブモードを試す",
                 "声のサービス：${if (useEleven()) "ElevenLabs" else "スマホ"}",
                 "顔認識：${if (prefs.getBoolean("faceOn", true)) "ON" else "OFF"}", "${aiName()}が覚えていること", "スキャンモード",
-                "手のジェスチャー：${arrayOf("充電中・ワークショップ時", "常に", "OFF")[prefs.getInt("gestureMode", 0)]}", "外部ディスプレイ表示：${if (prefs.getBoolean("extOn", true)) "ON" else "OFF"}", "パネルの並びを元に戻す")) { _, w ->
+                "手のジェスチャー：${arrayOf("充電中・ワークショップ時", "常に", "OFF")[prefs.getInt("gestureMode", 0)]}", "外部ディスプレイ表示：${if (prefs.getBoolean("extOn", true)) "ON" else "OFF"}", "パネルの並びを元に戻す", "通知の演出をテスト")) { _, w ->
                 when (w) {
                     0 -> askApiKey(); 1 -> askName(); 2 -> if (useEleven()) pickElevenVoice() else pickVoice(); 3 -> tuneVoice()
                     4 -> AlertDialog.Builder(this).setTitle("声の加工")
@@ -1227,6 +1244,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
                         }.show()
                     19 -> { val v = !prefs.getBoolean("extOn", true); prefs.edit().putBoolean("extOn", v).apply(); updateExternal() }
                     20 -> { prefs.edit().remove("order:wide").remove("order:narrow").remove("order:ws").apply(); recreate() }
+                    21 -> handler.postDelayed({ testNotification() }, 800)
                     14 -> AlertDialog.Builder(this).setTitle("声のサービス")
                         .setItems(arrayOf("ElevenLabs（高品質・要APIキー）", "スマホの読み上げ（無料・オフラインでも可）")) { _, which ->
                             if (which == 0) setupEleven() else { prefs.edit().putString("ttsProvider", "device").apply(); toast("スマホの声に戻しました") }
@@ -2038,6 +2056,7 @@ ${memories().ifEmpty { listOf("（まだなし）") }.joinToString("\n") { "・$
             drive.stats = s
             hud.lowPower = !s.charging
             updateTalkHint()
+            hud.notifLink = notifAccessEnabled() && NotifService.instance != null
             if (wakeActive && !wakeAllowed()) stopWake()
             if (tick % 60 == 30) proactiveTick()
             face?.let { f ->

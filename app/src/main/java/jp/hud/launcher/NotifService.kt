@@ -36,6 +36,7 @@ class NotifService : NotificationListenerService() {
 
     private val main = Handler(Looper.getMainLooper())
     private val seen = HashMap<String, Long>()
+    private val seenSig = HashMap<String, String>()
 
     override fun onListenerConnected() { instance = this }
     override fun onListenerDisconnected() { instance = null }
@@ -51,17 +52,20 @@ class NotifService : NotificationListenerService() {
         if (ex.getInt(Notification.EXTRA_PROGRESS_MAX, 0) > 0) return
 
         val now = System.currentTimeMillis()
-        val prev = seen[sbn.key]
-        seen[sbn.key] = now
-        if (seen.size > 200) seen.entries.removeIf { now - it.value > 10 * 60 * 1000 }
-        // 同じ通知の更新（音を鳴らさない更新）は無視
-        if (prev != null && n.flags and Notification.FLAG_ONLY_ALERT_ONCE != 0) return
-        if (prev != null && now - prev < 3000) return
-
         val title = ex.getCharSequence(Notification.EXTRA_TITLE)?.toString()?.trim() ?: ""
         val text = (ex.getCharSequence(Notification.EXTRA_BIG_TEXT) ?: ex.getCharSequence(Notification.EXTRA_TEXT))
             ?.toString()?.trim() ?: ""
         if (title.isEmpty() && text.isEmpty()) return
+        // 同じ通知の「中身が変わらない更新」だけ無視（LINEなどは同じ通知に新着メッセージを追記するため）
+        val sig = "$title|$text"
+        val prevSig = seenSig[sbn.key]
+        seenSig[sbn.key] = sig
+        if (seenSig.size > 200) seenSig.clear()
+        if (prevSig == sig) return
+        val prev = seen[sbn.key]
+        seen[sbn.key] = now
+        if (seen.size > 200) seen.entries.removeIf { now - it.value > 10 * 60 * 1000 }
+        if (prev != null && now - prev < 1500) return
 
         val label = try {
             packageManager.getApplicationLabel(packageManager.getApplicationInfo(sbn.packageName, 0)).toString()
