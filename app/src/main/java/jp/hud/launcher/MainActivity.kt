@@ -181,7 +181,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
         checkCarConnected()
         checkTalkIntent(intent)
         if (talkRequested) { talkRequested = false; intent = Intent(this, MainActivity::class.java); handler.postDelayed({ startAssistant() }, 250) }
-        else { wakeDeadline = System.currentTimeMillis() + WAKE_WINDOW_MS + 600; startWake(600) }
+        else { wakeDeadline = System.currentTimeMillis() + WAKE_WINDOW_MS + 1500; startWake(1500) }
         handler.postDelayed({ maybeMorningBriefing() }, 3200)
         NotifService.sink = { onNotif(it, live = true) }
         startMedia()
@@ -678,7 +678,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
             if (beepMuted) return
             beepMuted = true; mutedStreams.clear()
             val streams = mutableListOf(AudioManager.STREAM_NOTIFICATION, AudioManager.STREAM_SYSTEM, AudioManager.STREAM_ACCESSIBILITY)
-            if (!am.isMusicActive) streams += AudioManager.STREAM_MUSIC   // 音楽再生中は止めない
+            if (!mediaPlaying()) streams += AudioManager.STREAM_MUSIC   // 動画・音楽の再生中は止めない
             for (st in streams) try {
                 if (!am.isStreamMute(st)) { am.adjustStreamVolume(st, AudioManager.ADJUST_MUTE, 0); mutedStreams += st }
             } catch (e: Exception) { }
@@ -1331,8 +1331,16 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
     private fun silentMode(): Boolean =
         (getSystemService(AUDIO_SERVICE) as AudioManager).ringerMode != AudioManager.RINGER_MODE_NORMAL
 
+    /** 動画や音楽を再生中か（ピクチャーインピクチャーの動画も含む） */
+    private fun mediaPlaying(): Boolean {
+        val am = getSystemService(AUDIO_SERVICE) as AudioManager
+        return am.isMusicActive || controller?.playbackState?.state == android.media.session.PlaybackState.STATE_PLAYING
+    }
+
     private fun wakeAllowed(): Boolean {
         if (silentMode() && !drive.isShowing) return false
+        // 動画・音楽の再生中はマイクを使わない（マイクを開くと動画アプリが一時停止したりPiPが閉じたりするため）
+        if (mediaPlaying() && !drive.isShowing) return false
         val mode = prefs.getInt("wakeMode2", 0)
         val always = mode == 1 && (hud.stats.charging || drive.isShowing)
         return resumed && mode != 2 && (System.currentTimeMillis() < wakeDeadline || always) &&
