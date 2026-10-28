@@ -269,16 +269,24 @@ class HudView(context: Context) : View(context), SensorEventListener {
         if (width > 0) relayout(width, height)
     }
 
+    private var openingAt = 0L
+    private var lastStopAt = 0L
+    private val OPEN_DELAY = 650L
+
     fun start() {
         if (running) return
         running = true
-        bootStart = System.currentTimeMillis()
+        val now = System.currentTimeMillis()
+        // しばらくぶり（10分以上）ならフルのオープニング、すぐ戻ったときは短い演出
+        val cinematic = lastStopAt == 0L || now - lastStopAt > 10 * 60_000
+        openingAt = if (cinematic) now else 0L
+        bootStart = if (cinematic) now + OPEN_DELAY else now
         dBatt = 0f; dMem = 0f; dSto = 0f; dTemp = 0f
         sensors.getDefaultSensor(Sensor.TYPE_GRAVITY)?.let { sensors.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME) }
         invalidate()
     }
 
-    fun stop() { running = false; sensors.unregisterListener(this) }
+    fun stop() { running = false; lastStopAt = System.currentTimeMillis(); sensors.unregisterListener(this) }
 
     override fun onSensorChanged(e: SensorEvent) {
         gx = e.values[0] / 9.81f; gy = e.values[1] / 9.81f
@@ -719,9 +727,10 @@ class HudView(context: Context) : View(context), SensorEventListener {
             }
         }
         drawBootLog(c, nowMs)
+        drawOpening(c, nowMs)
 
         if (running) {
-            val anim = boot < 1f || expanded != null || ripples.isNotEmpty() || nowMs - incomingAt < 800 || abs(idleP - idleTarget) > 0.01f
+            val anim = boot < 1f || (openingAt != 0L && nowMs - openingAt < 3200) || expanded != null || ripples.isNotEmpty() || nowMs - incomingAt < 800 || abs(idleP - idleTarget) > 0.01f
             when { anim -> postInvalidateOnAnimation(); idleP > 0.9f -> postInvalidateDelayed(if (lowPower) 160 else 66); else -> postInvalidateDelayed(if (lowPower) 60 else 40) }
         }
     }
@@ -1178,6 +1187,104 @@ class HudView(context: Context) : View(context), SensorEventListener {
     private val textGlowL = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         typeface = Typeface.create("sans-serif-condensed", Typeface.BOLD); textAlign = Paint.Align.CENTER
         style = Paint.Style.STROKE; strokeWidth = 6f
+    }
+
+    /** フルのオープニング：電源オン → コア点火 → 衝撃波 → ホロ・グリッドの波 → パネルの枠が光でなぞられて組み上がる */
+    private fun drawOpening(c: Canvas, nowMs: Long) {
+        if (openingAt == 0L) return
+        val t = nowMs - openingAt
+        if (t > 3200) { openingAt = 0L; return }
+        val W = width.toFloat(); val H = height.toFloat()
+        val ox = cx; val oy = cy
+
+        // ① 電源オン（ブラウン管のように、光の点 → 横線 → 画面全体に開く）
+        if (t < 420) {
+            val a = (t / 200f).coerceIn(0f, 1f)
+            val b = ((t - 200) / 220f).coerceIn(0f, 1f)
+            val hw = W / 2 * ease(a); val hh = 2f + (H / 2) * ease(b)
+            val l = ox - hw; val r = ox + hw; val tp = oy - hh; val bt = oy + hh
+            fill.color = Color.BLACK
+            c.drawRect(0f, 0f, W, tp, fill); c.drawRect(0f, bt, W, H, fill)
+            c.drawRect(0f, tp, l, bt, fill); c.drawRect(r, tp, W, bt, fill)
+            glow.strokeWidth = 30f; glow.color = cyan(255)
+            c.drawLine(l, tp, r, tp, glow); c.drawLine(l, bt, r, bt, glow)
+            stroke.strokeWidth = 3f; stroke.color = Color.WHITE
+            c.drawLine(l, tp, r, tp, stroke); c.drawLine(l, bt, r, bt, stroke)
+            if (a < 1f) { fill.color = Color.WHITE; c.drawCircle(ox, oy, unit * 0.3f * (1 + a), fill) }
+        }
+        // ② コア点火のフラッシュ
+        if (t in 380..1100) {
+            val q = (t - 380) / 720f
+            fill.color = Color.WHITE
+            fill.shader = RadialGradient(ox, oy, max(W, H) * (0.25f + 0.5f * q),
+                intArrayOf(Color.argb((230 * (1 - q)).toInt(), 230, 250, 255), Color.argb((120 * (1 - q)).toInt(), 120, 222, 255), Color.TRANSPARENT),
+                floatArrayOf(0f, 0.25f, 1f), Shader.TileMode.CLAMP)
+            c.drawRect(0f, 0f, W, H, fill); fill.shader = null
+            // 横に伸びるレンズフレア
+            val fw = W * (0.3f + 0.7f * ease(q))
+            fill.shader = LinearGradient(ox - fw, 0f, ox + fw, 0f, intArrayOf(Color.TRANSPARENT, Color.argb((200 * (1 - q)).toInt(), 200, 240, 255), Color.TRANSPARENT), null, Shader.TileMode.CLAMP)
+            c.drawRect(ox - fw, oy - unit * 0.12f, ox + fw, oy + unit * 0.12f, fill); fill.shader = null
+        }
+        // ③ 衝撃波リング
+        for (k in 0 until 3) {
+            val st = 450 + k * 140
+            val q = ((t - st) / 900f)
+            if (q <= 0f || q >= 1f) continue
+            val r = coreR * (0.3f + 3.2f * ease(q))
+            glow.strokeWidth = 26f * (1 - q); glow.color = cyan((255 * (1 - q)).toInt()); c.drawCircle(ox, oy, r, glow)
+            stroke.strokeWidth = 2.5f; stroke.color = Color.argb((255 * (1 - q)).toInt(), 220, 248, 255); c.drawCircle(ox, oy, r, stroke)
+        }
+        // ④ ホロ・グリッドの波（画面全体に格子が一瞬浮かび上がる）
+        if (t in 600..1900) {
+            val q = (t - 600) / 1300f
+            val front = max(W, H) * 1.1f * ease(q)
+            val band = unit * 6f
+            stroke.strokeWidth = 1.2f
+            var gx = 0f
+            while (gx < W) {
+                var gy = 0f
+                while (gy < H) {
+                    val d = hypot(gx - ox, gy - oy)
+                    val k = 1f - abs(d - front) / band
+                    if (k > 0f) {
+                        stroke.color = cyan((200 * k * (1 - q)).toInt())
+                        c.drawLine(gx, gy, gx + unit, gy, stroke); c.drawLine(gx, gy, gx, gy + unit, stroke)
+                    }
+                    gy += unit
+                }
+                gx += unit
+            }
+        }
+        // ⑤ パネルの枠を光がなぞる（順番に）
+        var i = 0
+        for ((_, r) in panels) {
+            val st = 1000 + i * 120; i++
+            val q = ((t - st) / 650f)
+            if (q <= 0f || q >= 1.4f) continue
+            val p = Path().apply { addRect(r, Path.Direction.CW) }
+            val pm = PathMeasure(p, false)
+            val len = pm.length
+            val head = len * ease(q.coerceAtMost(1f))
+            val seg = Path()
+            pm.getSegment((head - len * 0.25f).coerceAtLeast(0f), head, seg, true)
+            val fade = if (q > 1f) 1f - (q - 1f) / 0.4f else 1f
+            glow.strokeWidth = 14f; glow.color = cyan((255 * fade).toInt()); c.drawPath(seg, glow)
+            stroke.strokeWidth = 3f; stroke.color = Color.argb((255 * fade).toInt(), 230, 250, 255); c.drawPath(seg, stroke)
+            val pos = FloatArray(2); pm.getPosTan(head, pos, null)
+            fill.color = Color.argb((255 * fade).toInt(), 255, 255, 255); c.drawCircle(pos[0], pos[1], unit * 0.15f, fill)
+        }
+        // ⑥ 中央に「SYSTEM BOOT」のタイトル
+        if (t in 380..1500) {
+            val q = (t - 380) / 1120f
+            val a = if (q < 0.2f) q / 0.2f else if (q > 0.75f) (1 - q) / 0.25f else 1f
+            label.textAlign = Paint.Align.CENTER; label.textSize = unit * 1.1f; label.letterSpacing = 0.6f + 0.3f * q
+            label.color = Color.argb((255 * a).toInt(), 230, 250, 255)
+            c.drawText("HUD//OS", ox, oy + coreR * 1.25f, label)
+            label.textSize = unit * 0.45f; label.letterSpacing = 0.5f; label.color = cyan((200 * a).toInt())
+            c.drawText("SYSTEM BOOT SEQUENCE", ox, oy + coreR * 1.25f + unit * 0.9f, label)
+            label.letterSpacing = 0f; label.color = CYAN
+        }
+        postInvalidateOnAnimation()
     }
 
     private fun drawBootLog(c: Canvas, nowMs: Long) {
