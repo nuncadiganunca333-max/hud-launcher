@@ -395,6 +395,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
         apps = packageManager.queryIntentActivities(i, 0)
             .filter { it.activityInfo.packageName != packageName }
             .map { AppEntry(it.loadLabel(packageManager).toString(), it.activityInfo.packageName, it.activityInfo.name) }
+            .plus(Shortcuts.entries(this))   // pinned shortcuts (Chrome "ホーム画面に追加" etc.)
             .sortedBy { it.label.lowercase() }
         applyFilter()
         refreshDock()
@@ -425,6 +426,10 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
             try {
                 val opts = src?.let {
                     android.app.ActivityOptions.makeClipRevealAnimation(hud, it.left, it.top, it.width(), it.height()).toBundle()
+                }
+                if (Shortcuts.isShortcut(app)) {
+                    if (!Shortcuts.launch(this, app, src, opts)) toast("開けませんでした（HUD Launcherをホームアプリにしてください）")
+                    return@Runnable
                 }
                 startActivity(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
                     .setComponent(ComponentName(app.pkg, app.cls))
@@ -1969,7 +1974,22 @@ ${memories().ifEmpty { listOf("（まだなし）") }.joinToString("\n") { "・$
             }
             setOnItemLongClickListener { _, _, p, _ ->
                 SoundFx.play(SoundFx.Fx.DONE)
-                toggleDock(filtered[p]); (adapter as BaseAdapter).notifyDataSetChanged(); true
+                val app = filtered[p]
+                if (Shortcuts.isShortcut(app)) {
+                    val docked = hud.dock.any { it.key == app.key }
+                    AlertDialog.Builder(this@MainActivity).setTitle(app.label)
+                        .setItems(arrayOf(if (docked) "リングから外す" else "リングに登録", "ホームから削除")) { _, w ->
+                            if (w == 0) toggleDock(app)
+                            else {
+                                Shortcuts.remove(this@MainActivity, app); iconCache.remove(app.key)
+                                if (docked) toggleDock(app)
+                                toast("削除しました：${app.label}"); loadApps()
+                            }
+                            (adapter as BaseAdapter).notifyDataSetChanged()
+                        }.show()
+                    return@setOnItemLongClickListener true
+                }
+                toggleDock(app); (adapter as BaseAdapter).notifyDataSetChanged(); true
             }
         }
         box.addView(grid, LinearLayout.LayoutParams(-1, 0, 1f))
@@ -1984,6 +2004,7 @@ ${memories().ifEmpty { listOf("（まだなし）") }.joinToString("\n") { "・$
     private var frequentCount = 0
 
     private fun iconOf(app: AppEntry): android.graphics.drawable.Drawable? = iconCache.getOrPut(app.key) {
+        if (Shortcuts.isShortcut(app)) return Shortcuts.icon(this, app)?.also { iconCache[app.key] = it }
         try { packageManager.getActivityIcon(ComponentName(app.pkg, app.cls)) } catch (e: Exception) {
             try { packageManager.getApplicationIcon(app.pkg) } catch (e2: Exception) { return null }
         }
