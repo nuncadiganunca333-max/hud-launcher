@@ -38,6 +38,7 @@ class ExternalHud(outer: Context, display: Display) : Presentation(outer, displa
                 override fun onPanelsAlpha(a: Float) {}
                 override fun onUserActivity() {}
                 override fun onScan() {}
+                override fun onPay() {}
             }
         }
         root.addView(hud, FrameLayout.LayoutParams(-1, -1))

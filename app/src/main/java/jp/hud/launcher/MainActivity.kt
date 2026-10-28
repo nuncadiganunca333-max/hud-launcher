@@ -44,13 +44,15 @@ data class AppEntry(val label: String, val pkg: String, val cls: String) {
     val key get() = "$pkg/$cls"
 }
 
-class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, AssistantOverlay.Listener, DriveView.Listener, ScanOverlay.Listener {
+class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, AssistantOverlay.Listener, DriveView.Listener, ScanOverlay.Listener, PayOverlay.Listener {
 
     private val CYAN = Color.rgb(0, 229, 255)
     private lateinit var hud: HudView
     private lateinit var drawer: LinearLayout
     private lateinit var grid: GridView
     private lateinit var search: EditText
+    private lateinit var freqBox: LinearLayout
+    private lateinit var freqRow: LinearLayout
     private var apps: List<AppEntry> = emptyList()
     private var filtered: List<AppEntry> = emptyList()
     private val handler = Handler(Looper.getMainLooper())
@@ -62,6 +64,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
     private lateinit var rootView: FrameLayout
     private var glPausedAt = 0L
     private lateinit var scan: ScanOverlay
+    private lateinit var pay: PayOverlay
     private val camOwner = CamOwner()
     private var face: FaceWatcher? = null
     private var faceGoneAt = 0L
@@ -108,6 +111,8 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
         root.addView(drive, FrameLayout.LayoutParams(-1, -1))
         scan = ScanOverlay(this, camOwner).also { it.listener = this }
         root.addView(scan, FrameLayout.LayoutParams(-1, -1))
+        pay = PayOverlay(this).also { it.listener = this }
+        root.addView(pay, FrameLayout.LayoutParams(-1, -1))
         root.addView(alert, FrameLayout.LayoutParams(-1, -1))
         root.addView(assistant, FrameLayout.LayoutParams(-1, -1))
         drawer = buildDrawer()
@@ -137,6 +142,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
     override fun onResume() {
         super.onResume()
         loadApps()
+        refreshPay()
         hud.start()
         handler.post(statsLoop)
         hud.wake()
@@ -241,6 +247,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
     override fun onBackPressed() {
         if (assistant.isShowing) { onAssistantClose(); return }
         if (scan.isShowing) { onScanClose(); return }
+        if (pay.isShowing) { pay.close(); return }
         if (alert.isShowing) alert.listener?.let { onAlertDismiss(alertQueue.firstOrNull() ?: return) }
         else if (drawer.visibility == View.VISIBLE) closeDrawer()
     }
@@ -931,6 +938,94 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
         onNotif(item, live = true)
     }
 
+    // ---------- payment module ----------
+    private val PAY_CANDIDATES = listOf("jp.ne.paypay.android.app", "jp.co.rakuten.pay", "com.nttdocomo.android.dpay", "jp.auone.wallet", "jp.co.rakuten.rpay")
+
+    private fun installed(pkg: String) = try { packageManager.getApplicationInfo(pkg, 0); true } catch (e: Exception) { false }
+
+    private fun payPkg(): String? {
+        prefs.getString("payPkg", null)?.let { if (installed(it)) return it }
+        return PAY_CANDIDATES.firstOrNull { installed(it) }
+    }
+
+    private fun refreshPay() { hud.payEnabled = payPkg() != null }
+
+    /** アプリのショートカット（長押しメニューの項目）を取得。ホームアプリなので使える */
+    private fun shortcutsOf(pkg: String): List<android.content.pm.ShortcutInfo> {
+        val la = getSystemService(LAUNCHER_APPS_SERVICE) as android.content.pm.LauncherApps
+        if (!la.hasShortcutHostPermission()) return emptyList()
+        return try {
+            val q = android.content.pm.LauncherApps.ShortcutQuery().setPackage(pkg).setQueryFlags(
+                android.content.pm.LauncherApps.ShortcutQuery.FLAG_MATCH_MANIFEST or android.content.pm.LauncherApps.ShortcutQuery.FLAG_MATCH_DYNAMIC or
+                    android.content.pm.LauncherApps.ShortcutQuery.FLAG_MATCH_PINNED)
+            (la.getShortcuts(q, android.os.Process.myUserHandle()) ?: emptyList()).filter { it.isEnabled }.sortedBy { it.rank }
+        } catch (e: Exception) { emptyList() }
+    }
+
+    private fun payScore(label: String): Int = when {
+        listOf("支払", "払う", "バーコード", "コード", "pay").any { label.contains(it, true) } -> 0
+        listOf("スキャン", "読み取", "scan").any { label.contains(it, true) } -> 1
+        listOf("送る", "送金", "受け取").any { label.contains(it) } -> 2
+        else -> 3
+    }
+
+    override fun onPay() {
+        val pkg = payPkg() ?: run { toast("決済アプリが見つかりません"); return }
+        val la = getSystemService(LAUNCHER_APPS_SERVICE) as android.content.pm.LauncherApps
+        val dens = resources.displayMetrics.densityDpi
+        val acts = shortcutsOf(pkg).sortedBy { payScore(it.shortLabel?.toString() ?: "") }.take(4).map {
+            PayOverlay.Action(it.id, (it.shortLabel ?: it.longLabel ?: "").toString(), try { la.getShortcutIconDrawable(it, dens) } catch (e: Exception) { null })
+        }
+        val appIcon = try { packageManager.getApplicationIcon(pkg) } catch (e: Exception) { null }
+        val name = try { packageManager.getApplicationLabel(packageManager.getApplicationInfo(pkg, 0)).toString() } catch (e: Exception) { pkg }
+        closeDrawer()
+        pay.open(name, appIcon, acts + PayOverlay.Action("__app__", "アプリを開く", appIcon))
+    }
+
+    override fun onPayAction(action: PayOverlay.Action, src: android.graphics.Rect) {
+        val pkg = payPkg() ?: return
+        handler.postDelayed({
+            pay.close()
+            if (action.id == "__app__") openPayApp(pkg, src) else startShortcut(pkg, action.id, src)
+        }, 250)
+    }
+
+    override fun onPayClose() { pay.close() }
+
+    private fun openPayApp(pkg: String, src: android.graphics.Rect?) {
+        packageManager.getLaunchIntentForPackage(pkg)?.let { i ->
+            val opts = src?.let { android.app.ActivityOptions.makeClipRevealAnimation(hud, it.left, it.top, it.width(), it.height()).toBundle() }
+            try { startActivity(i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK), opts) } catch (e: Exception) { toast("開けませんでした") }
+        }
+    }
+
+    private fun startShortcut(pkg: String, id: String, src: android.graphics.Rect?) {
+        val la = getSystemService(LAUNCHER_APPS_SERVICE) as android.content.pm.LauncherApps
+        try {
+            val opts = src?.let { android.app.ActivityOptions.makeClipRevealAnimation(hud, it.left, it.top, it.width(), it.height()).toBundle() }
+            la.startShortcut(pkg, id, src, opts, android.os.Process.myUserHandle())
+        } catch (e: Exception) { openPayApp(pkg, src) }
+    }
+
+    /** 声やボタンから直接「支払う」「スキャン」を開く */
+    private fun payDirect(pkg: String, act: String) {
+        val list = shortcutsOf(pkg)
+        val hit = when (act) {
+            "pay" -> list.firstOrNull { payScore(it.shortLabel?.toString() ?: "") == 0 }
+            "scan" -> list.firstOrNull { payScore(it.shortLabel?.toString() ?: "") == 1 }
+            else -> null
+        }
+        if (hit != null) startShortcut(pkg, hit.id, null) else openPayApp(pkg, null)
+    }
+
+    private fun pickPayApp() {
+        val all = apps.distinctBy { it.pkg }
+        val names = all.map { it.label }.toTypedArray()
+        AlertDialog.Builder(this).setTitle("¥ PAY で使う決済アプリ")
+            .setItems(names) { _, w -> prefs.edit().putString("payPkg", all[w].pkg).apply(); refreshPay(); toast("${all[w].label} を設定しました") }
+            .setNegativeButton("キャンセル", null).show()
+    }
+
     // ---------- memory ----------
     private fun memories(): List<String> = try {
         val a = org.json.JSONArray(prefs.getString("memories", "[]")); (0 until a.length()).map { a.getString(it) }
@@ -1230,7 +1325,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
                 "ドライブモードの車を設定", "ドライブモードを試す",
                 "声のサービス：${if (useEleven()) "ElevenLabs" else "スマホ"}",
                 "顔認識：${if (prefs.getBoolean("faceOn", true)) "ON" else "OFF"}", "${aiName()}が覚えていること", "スキャンモード",
-                "手のジェスチャー：${arrayOf("充電中・ワークショップ時", "常に", "OFF")[prefs.getInt("gestureMode", 0)]}", "外部ディスプレイ表示：${if (prefs.getBoolean("extOn", true)) "ON" else "OFF"}", "パネルの並びを元に戻す", "通知の演出をテスト")) { _, w ->
+                "手のジェスチャー：${arrayOf("充電中・ワークショップ時", "常に", "OFF")[prefs.getInt("gestureMode", 0)]}", "外部ディスプレイ表示：${if (prefs.getBoolean("extOn", true)) "ON" else "OFF"}", "パネルの並びを元に戻す", "通知の演出をテスト", "¥ PAY の決済アプリ", "よく使うアプリをスマホ全体の使用時間で判定")) { _, w ->
                 when (w) {
                     0 -> askApiKey(); 1 -> askName(); 2 -> if (useEleven()) pickElevenVoice() else pickVoice(); 3 -> tuneVoice()
                     4 -> AlertDialog.Builder(this).setTitle("声の加工")
@@ -1262,6 +1357,8 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
                     19 -> { val v = !prefs.getBoolean("extOn", true); prefs.edit().putBoolean("extOn", v).apply(); updateExternal() }
                     20 -> { prefs.edit().remove("order:wide").remove("order:narrow").remove("order:ws").apply(); recreate() }
                     21 -> handler.postDelayed({ testNotification() }, 800)
+                    22 -> pickPayApp()
+                    23 -> { toast("一覧から「HUD Launcher」を選んで許可してください"); safeStart(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)) }
                     14 -> AlertDialog.Builder(this).setTitle("声のサービス")
                         .setItems(arrayOf("ElevenLabs（高品質・要APIキー）", "スマホの読み上げ（無料・オフラインでも可）")) { _, which ->
                             if (which == 0) setupEleven() else { prefs.edit().putString("ttsProvider", "device").apply(); toast("スマホの声に戻しました") }
@@ -1794,6 +1891,15 @@ ${memories().ifEmpty { listOf("（まだなし）") }.joinToString("\n") { "・$
                 }, 1800) }
                 "${hit.first}さんに発信します"
             }
+            "open_pay" -> {
+                val pkg = payPkg() ?: return "決済アプリが見つかりません"
+                val act = input.optString("action")
+                ui { handler.postDelayed({
+                    sessionActive = false; recognizer?.cancel(); assistant.close()
+                    when (act) { "menu" -> onPay(); else -> payDirect(pkg, act) }
+                }, 1200) }
+                when (act) { "pay" -> "支払い画面を開きます"; "scan" -> "スキャン画面を開きます"; "menu" -> "支払いモジュールを開きます"; else -> "アプリを開きます" }
+            }
             "camera_scan" -> {
                 val q = input.optString("question")
                 ui { handler.postDelayed({ sessionActive = false; recognizer?.cancel(); assistant.close(); openScan(q) }, 1300) }
@@ -1916,7 +2022,7 @@ ${memories().ifEmpty { listOf("（まだなし）") }.joinToString("\n") { "・$
         })
         box.addView(header)
         box.addView(TextView(this).apply {
-            text = "上段はよく使うアプリ ／ タップで起動 ／ 長押しでリングに登録・解除"
+            text = "タップで起動 ／ 長押しでリングに登録・解除"
             setTextColor(Color.argb(160, 0, 229, 255)); textSize = 12f
             setPadding(0, dp(2), 0, dp(10))
         })
@@ -1932,6 +2038,16 @@ ${memories().ifEmpty { listOf("（まだなし）") }.joinToString("\n") { "・$
             })
         }
         box.addView(search, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(12) })
+        // よく使うアプリ（横並び・大きめ）
+        freqBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        freqBox.addView(TextView(this).apply {
+            text = "◆ FREQUENTLY USED"; setTextColor(CYAN); textSize = 13f; letterSpacing = 0.3f
+            typeface = Typeface.create("sans-serif-condensed", Typeface.BOLD); setPadding(dp(2), 0, 0, dp(6))
+        })
+        freqRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        freqBox.addView(HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false; addView(freqRow) })
+        freqBox.addView(View(this).apply { setBackgroundColor(Color.argb(90, 120, 222, 255)) }, LinearLayout.LayoutParams(-1, dp(1)).apply { topMargin = dp(10); bottomMargin = dp(10) })
+        box.addView(freqBox)
         grid = GridView(this).apply {
             numColumns = GridView.AUTO_FIT
             columnWidth = dp(92)
@@ -1967,7 +2083,7 @@ ${memories().ifEmpty { listOf("（まだなし）") }.joinToString("\n") { "・$
                     (ring.getChildAt(0) as ImageView).setImageDrawable(iconOf(app))
                     (ring.background as GradientDrawable).setStroke(dp(if (docked) 2 else 1), Color.argb(if (docked) 255 else 150, 0, 229, 255))
                     (cell.getChildAt(1) as TextView).text = if (docked) "◆ ${app.label}" else app.label
-                    cell.background = if (p < frequentCount) frameBg(70) else null
+                    cell.background = null
                     return cell
                 }
             }
@@ -2000,19 +2116,75 @@ ${memories().ifEmpty { listOf("（まだなし）") }.joinToString("\n") { "・$
 
     private fun countOf(app: AppEntry) = prefs.getInt("cnt:" + app.key, 0)
 
+    // スマホ全体の使用時間（「使用状況へのアクセス」を許可したときだけ）
+    private var usageCache: Map<String, Long> = emptyMap()
+    private var usageAt = 0L
+    private fun usageAllowed(): Boolean = try {
+        val ops = getSystemService(APP_OPS_SERVICE) as android.app.AppOpsManager
+        ops.unsafeCheckOpNoThrow(android.app.AppOpsManager.OPSTR_GET_USAGE_STATS, android.os.Process.myUid(), packageName) == android.app.AppOpsManager.MODE_ALLOWED
+    } catch (e: Exception) { false }
+    private fun usage(): Map<String, Long> {
+        if (!usageAllowed()) return emptyMap()
+        val now = System.currentTimeMillis()
+        if (now - usageAt < 10 * 60_000 && usageCache.isNotEmpty()) return usageCache
+        usageCache = try {
+            val um = getSystemService(USAGE_STATS_SERVICE) as android.app.usage.UsageStatsManager
+            um.queryAndAggregateUsageStats(now - 14L * 86_400_000, now).mapValues { it.value.totalTimeInForeground }
+        } catch (e: Exception) { emptyMap() }
+        usageAt = now
+        return usageCache
+    }
+
+    /** よく使う度合い：このホームから開いた回数 ＋ 使用時間（5分＝1回分） */
+    private fun freqScore(app: AppEntry, u: Map<String, Long>): Float = countOf(app) + (u[app.pkg] ?: 0L) / 300_000f
+
     private fun applyFilter() {
         if (!::grid.isInitialized) return
         val q = search.text.toString().trim().lowercase()
+        frequentCount = 0
         if (q.isEmpty()) {
-            // よく使うアプリを先頭に（最大8個）、残りは名前順
-            val freq = apps.filter { countOf(it) > 0 }.sortedByDescending { countOf(it) }.take(8)
-            frequentCount = freq.size
-            filtered = freq + apps.filter { a -> freq.none { it.key == a.key } }
+            val u = usage()
+            val freq = apps.filter { it.pkg != packageName }.map { it to freqScore(it, u) }.filter { it.second > 0f }
+                .sortedByDescending { it.second }.map { it.first }.distinctBy { it.pkg }.take(8)
+            buildFreqRow(freq)
+            freqBox.visibility = if (freq.isEmpty()) View.GONE else View.VISIBLE
+            filtered = apps
         } else {
-            frequentCount = 0
+            freqBox.visibility = View.GONE
             filtered = apps.filter { it.label.lowercase().contains(q) || it.pkg.lowercase().contains(q) }
         }
         (grid.adapter as BaseAdapter).notifyDataSetChanged()
+    }
+
+    private fun buildFreqRow(list: List<AppEntry>) {
+        freqRow.removeAllViews()
+        for (app in list) {
+            val cell = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL
+                setPadding(dp(6), dp(4), dp(6), dp(4))
+            }
+            val ring = FrameLayout(this).apply {
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.OVAL
+                    setColor(Color.argb(70, 120, 222, 255)); setStroke(dp(2), Color.argb(230, 150, 230, 255))
+                }
+                setPadding(dp(9), dp(9), dp(9), dp(9))
+                addView(ImageView(this@MainActivity).apply { setImageDrawable(iconOf(app)) }, FrameLayout.LayoutParams(dp(52), dp(52)))
+                elevation = dp(6).toFloat()
+            }
+            cell.addView(ring, LinearLayout.LayoutParams(dp(72), dp(72)))
+            cell.addView(TextView(this).apply {
+                text = app.label; setTextColor(CYAN); textSize = 11.5f; gravity = Gravity.CENTER
+                maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END
+                setPadding(0, dp(5), 0, 0)
+            }, LinearLayout.LayoutParams(dp(84), -2))
+            cell.setOnClickListener { v ->
+                val loc = IntArray(2); v.getLocationInWindow(loc)
+                launch(app, android.graphics.Rect(loc[0], loc[1], loc[0] + v.width, loc[1] + v.height)); closeDrawer()
+            }
+            cell.setOnLongClickListener { toggleDock(app); applyFilter(); true }
+            freqRow.addView(cell)
+        }
     }
 
     private fun openDrawer() {

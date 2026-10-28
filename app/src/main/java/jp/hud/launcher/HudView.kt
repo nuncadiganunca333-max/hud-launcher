@@ -67,6 +67,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
         fun onModuleEdit()
         fun onPanelsAlpha(a: Float)
         fun onScan()
+        fun onPay()
         fun onUserActivity()
     }
 
@@ -89,6 +90,8 @@ class HudView(context: Context) : View(context), SensorEventListener {
     var thinking = false
     var userTag = "YUDAI"
     var gl: GLBackground? = null
+    var payEnabled = false
+        set(v) { field = v; invalidate() }
     var interactive = true
     var gestureState = 0       // 0=OFF, 1=ON, 2=ジェスチャーON, -1=エラー
     var gestureMotion = 0f
@@ -1438,12 +1441,13 @@ class HudView(context: Context) : View(context), SensorEventListener {
     }
 
     // ---------- core / radial launcher ----------
-    private class Seg(val app: AppEntry?, val isApps: Boolean, val isScan: Boolean = false)
+    private class Seg(val app: AppEntry?, val isApps: Boolean, val isScan: Boolean = false, val isPay: Boolean = false)
 
     private fun segments(): List<Seg> {
         val list = ArrayList<Seg>()
         dock.take(10).forEach { list += Seg(it, false) }
         list += Seg(null, false, true)
+        if (payEnabled) list += Seg(null, false, false, true)
         list += Seg(null, true)
         while (list.size < 6) list.add(list.size - 2, Seg(null, false))
         return list
@@ -1510,13 +1514,13 @@ class HudView(context: Context) : View(context), SensorEventListener {
             val p = Path()
             p.arcTo(outer, a0, sweep, true); p.arcTo(inner, a0 + sweep, -sweep); p.close()
             val near = 1f - min(1f, abs(hl - i).let { min(it, n - it) })
-            val active = sg.app != null || sg.isApps || sg.isScan
+            val active = sg.app != null || sg.isApps || sg.isScan || sg.isPay
             fill.color = Color.WHITE; fill.shader = RadialGradient(cx, cy, r2, intArrayOf(cyan(0), cyan(if (sg.isApps) 70 else if (active) 35 else 10), cyan(if (sg.isApps) 120 else if (active) (55 + 60 * near).toInt() else 18)),
                 floatArrayOf(0f, r1 / r2, 1f), Shader.TileMode.CLAMP)
             c.drawPath(p, fill); fill.shader = null
             if (active) { glow.strokeWidth = 6f; glow.color = cyan((60 + 80 * near).toInt()); c.drawPath(p, glow) }
             stroke.strokeWidth = 2f; stroke.color = cyan(if (active) 200 else 70); c.drawPath(p, stroke)
-            val text = when { sg.isApps -> "APPS"; sg.isScan -> "◎ SCAN"; sg.app != null -> sg.app.label.uppercase(); else -> "+" }
+            val text = when { sg.isApps -> "APPS"; sg.isScan -> "◎ SCAN"; sg.isPay -> "¥ PAY"; sg.app != null -> sg.app.label.uppercase(); else -> "+" }
             label.textSize = (r2 - r1) * (if (active) (if (n > 8) 0.25f else 0.30f) else 0.4f); label.textAlign = Paint.Align.LEFT; label.letterSpacing = 0.08f
             label.color = if (active) CYAN else cyan(70)
             val center = (a0 + sweep / 2 + 360f) % 360f
@@ -2094,6 +2098,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
         segmentAt(x, y)?.let { s ->
             when {
                 s.isScan -> { SoundFx.play(SoundFx.Fx.OPEN); listener?.onScan() }
+                s.isPay -> { SoundFx.play(SoundFx.Fx.OPEN); listener?.onPay() }
                 s.isApps || s.app == null -> { SoundFx.play(SoundFx.Fx.OPEN); listener?.onOpenDrawer() }
                 else -> {
                     SoundFx.play(SoundFx.Fx.OPEN)

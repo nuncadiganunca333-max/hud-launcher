@@ -140,6 +140,8 @@ class ClaudeAgent(var apiKey: String, var model: String = "claude-haiku-5-5") {
                     JSONObject().put("fact", str("覚える内容（短く）")), listOf("fact")))
                 .put(tool("forget", "覚えている内容のうち、キーワードに一致するものを忘れる。",
                     JSONObject().put("keyword", str("忘れる内容のキーワード")), listOf("keyword")))
+                .put(tool("open_pay", "決済アプリ（PayPayなど）を開く。action=pay はバーコード支払い画面、scan はスキャン画面、menu は支払いモジュールの画面、app はアプリのトップ。",
+                    JSONObject().put("action", JSONObject().put("type", "string").put("enum", JSONArray(listOf("pay", "scan", "menu", "app")))), listOf("action")))
                 .put(tool("call_contact", "連絡先の相手に電話をかける。nameは連絡先の名前。",
                     JSONObject().put("name", str("相手の名前")), listOf("name")))
         }
