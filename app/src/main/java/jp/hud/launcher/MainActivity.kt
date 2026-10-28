@@ -290,6 +290,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
 
     private fun say(n: NotifItem) {
         if (!ttsReady || !prefs.getBoolean("voice", true)) return
+        if (mediaPlaying()) return   // 動画・音楽の再生中は読み上げない（画面の演出だけ）
         val am = getSystemService(AUDIO_SERVICE) as AudioManager
         if (am.ringerMode != AudioManager.RINGER_MODE_NORMAL) return
         val who = if (n.title.isNotEmpty() && n.title.length <= 20) "、${n.title}さんから" else ""
@@ -1123,7 +1124,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
     private val announced = HashSet<String>()
     private var lastBattWarn = 100
 
-    private fun canSpeakProactive() = resumed && ttsReady && !silentMode() && !assistant.isShowing && !alert.isShowing && fxPlayer == null
+    private fun canSpeakProactive() = resumed && ttsReady && !silentMode() && !mediaPlaying() && !assistant.isShowing && !alert.isShowing && fxPlayer == null
 
     /** 予定一覧（dayOffset日後から days日分） */
     private fun events(dayOffset: Int, days: Int = 1): List<Triple<Long, String, Boolean>> {
