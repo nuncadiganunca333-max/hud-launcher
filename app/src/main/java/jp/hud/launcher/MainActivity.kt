@@ -138,6 +138,8 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
         handler.post(statsLoop)
         hud.wake()
         glBg.paused = false
+        glBg.ensureRunning()
+        handler.postDelayed({ if (resumed) glBg.ensureRunning() }, 1500)
         camOwner.resume()
         startFace()
         applyKeepScreen()

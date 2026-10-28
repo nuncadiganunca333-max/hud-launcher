@@ -610,6 +610,12 @@ class HudView(context: Context) : View(context), SensorEventListener {
         c.translate(sin(t / 60f) * 4f, cos(t / 47f) * 4f)
 
         layerPaint.alpha = (255 * min(1f, boot * 2.5f)).toInt()
+        // 3D背景がまだ・または作り直し中のときは2Dの背景で埋める（真っ暗にしない）
+        if (gl?.ready != true) {
+            fill.color = Color.WHITE; fill.shader = RadialGradient(cx, cy, max(width, height) * 0.8f,
+                intArrayOf(Color.rgb(8, 46, 76), Color.rgb(3, 18, 34), Color.rgb(1, 5, 11)), floatArrayOf(0f, 0.5f, 1f), Shader.TileMode.CLAMP)
+            c.drawRect(0f, 0f, width.toFloat(), height.toFloat(), fill); fill.shader = null
+        }
         c.drawBitmap(bg, -bgMargin - px * 0.7f, -bgMargin - py * 0.7f, layerPaint)
         if (!lowPower) drawDataRain(c, t)
         drawWeatherFx(c, t)

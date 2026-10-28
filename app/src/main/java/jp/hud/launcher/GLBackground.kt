@@ -51,8 +51,22 @@ class GLBackground(context: Context) : TextureView(context), TextureView.Surface
     private val SCALE = 0.55f
 
     override fun onSurfaceTextureAvailable(st: SurfaceTexture, w: Int, h: Int) {
+        startThread(st, w, h)
+    }
+
+    private fun startThread(st: SurfaceTexture, w: Int, h: Int) {
+        // 古い描画スレッドが残っていたら止めてから作り直す
+        thread?.let { it.quit(); try { it.join(500) } catch (e: Exception) { } }
         st.setDefaultBufferSize((w * SCALE).toInt(), (h * SCALE).toInt())
         thread = RenderThread(st, w, h).also { it.start() }
+    }
+
+    /** ホームに戻ったときに呼ぶ：描画が止まっていたら作り直す */
+    fun ensureRunning() {
+        val st = surfaceTexture ?: return
+        if (!isAvailable || width == 0) return
+        val t = thread
+        if (t == null || !t.isAlive || t.failed) startThread(st, width, height)
     }
     override fun onSurfaceTextureSizeChanged(st: SurfaceTexture, w: Int, h: Int) {
         st.setDefaultBufferSize((w * SCALE).toInt(), (h * SCALE).toInt()); thread?.resize(w, h)
@@ -66,6 +80,7 @@ class GLBackground(context: Context) : TextureView(context), TextureView.Surface
 
     private inner class RenderThread(val st: SurfaceTexture, @Volatile var w: Int, @Volatile var h: Int) : Thread("hud-gl") {
         @Volatile private var running = true
+        @Volatile var failed = false
         private var display: EGLDisplay = EGL14.EGL_NO_DISPLAY
         private var ctx: EGLContext = EGL14.EGL_NO_CONTEXT
         private var surf: EGLSurface = EGL14.EGL_NO_SURFACE
@@ -84,7 +99,11 @@ class GLBackground(context: Context) : TextureView(context), TextureView.Surface
                     if (!paused) {
                         GLES20.glViewport(0, 0, (w * SCALE).toInt(), (h * SCALE).toInt())
                         drawFrame((frameStart - t0) / 1e9f)
-                        EGL14.eglSwapBuffers(display, surf)
+                        if (!EGL14.eglSwapBuffers(display, surf)) {
+                            // 画面の裏に回った間に描画先が無効になった → このスレッドは終了し、戻ったときに作り直す
+                            val err = EGL14.eglGetError()
+                            if (err == EGL14.EGL_BAD_SURFACE || err == EGL14.EGL_BAD_NATIVE_WINDOW || err == EGL14.EGL_CONTEXT_LOST) { failed = true; break }
+                        }
                     }
                     val budget = 1_000_000_000L / fps.coerceIn(5, 60)
                     val spent = System.nanoTime() - frameStart
@@ -92,8 +111,9 @@ class GLBackground(context: Context) : TextureView(context), TextureView.Surface
                     if (sleep > 0) sleep(sleep) else if (paused) sleep(100)
                 }
             } catch (e: Throwable) {
-                ready = false
+                failed = true
             } finally {
+                if (thread === this) ready = false
                 releaseEgl()
             }
         }
