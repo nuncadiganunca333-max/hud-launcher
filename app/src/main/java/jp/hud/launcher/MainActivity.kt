@@ -59,6 +59,8 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
     private lateinit var assistant: AssistantOverlay
     private lateinit var drive: DriveView
     private lateinit var glBg: GLBackground
+    private lateinit var rootView: FrameLayout
+    private var glPausedAt = 0L
     private lateinit var scan: ScanOverlay
     private val camOwner = CamOwner()
     private var face: FaceWatcher? = null
@@ -91,6 +93,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
         window.setDecorFitsSystemWindows(false)
 
         val root = FrameLayout(this)
+        rootView = root
         glBg = GLBackground(this)
         root.addView(glBg, FrameLayout.LayoutParams(-1, -1))
         hud = HudView(this).also { it.listener = this; it.gl = glBg }
@@ -137,9 +140,8 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
         hud.start()
         handler.post(statsLoop)
         hud.wake()
-        glBg.paused = false
-        glBg.ensureRunning()
-        handler.postDelayed({ if (resumed) glBg.ensureRunning() }, 1500)
+        // 他のアプリから戻ったときは、3D描画のレイヤーを毎回作り直す（描画先が失われていても確実に復帰させる）
+        if (glPausedAt != 0L) rebuildGl() else glBg.paused = false
         camOwner.resume()
         startFace()
         applyKeepScreen()
@@ -200,6 +202,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
 
     override fun onPause() {
         super.onPause()
+        glPausedAt = System.currentTimeMillis()
         // 聞き取りを止めると終了音が鳴るので、ミュートしたまま止めてから少し後に戻す
         val wasListening = beepMuted || wakeActive || sessionActive || alert.listening
         if (wasListening) muteBeeps(true)
@@ -563,6 +566,17 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
             REQ_BIND -> configureWidget(id)
             REQ_CONFIG -> { finishWidget(id); pendingWidgetId = -1 }
         }
+    }
+
+    private fun rebuildGl() {
+        val old = glBg
+        val idx = rootView.indexOfChild(old).coerceAtLeast(0)
+        val fresh = GLBackground(this)
+        rootView.addView(fresh, idx, FrameLayout.LayoutParams(-1, -1))
+        rootView.removeView(old)
+        glBg = fresh
+        hud.gl = fresh
+        fresh.paused = false
     }
 
     // ---------- screen / effects ----------
