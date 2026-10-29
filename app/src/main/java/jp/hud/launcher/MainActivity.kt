@@ -147,7 +147,12 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
         handler.post(statsLoop)
         hud.wake()
         // 他のアプリから戻ったときは、3D描画のレイヤーを毎回作り直す（描画先が失われていても確実に復帰させる）
-        if (glPausedAt != 0L) rebuildGl() else glBg.paused = false
+        if (pipSafe()) { glBg.visibility = View.GONE; hud.gl = null }
+        else {
+            glBg.visibility = View.VISIBLE; hud.gl = glBg
+            // 3D描画の作り直しは、PiPへの切り替えが終わってから
+            if (glPausedAt != 0L) handler.postDelayed({ if (resumed) rebuildGl() }, 900) else glBg.paused = false
+        }
         camOwner.resume()
         // 動画アプリがPiPに切り替わるのを邪魔しないよう、カメラの起動は少し待つ
         handler.postDelayed({ if (resumed) startFace() }, 2500)
@@ -635,7 +640,12 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
 
     private var visualizer: android.media.audiofx.Visualizer? = null
 
+    /** PiP互換モード：カメラ・マイク・実音の音楽解析・3D描画を止めて、他アプリの動作を邪魔しない */
+    private fun pipSafe() = prefs.getBoolean("pipSafe", false)
+
     private fun startVisualizer() {
+        // 出力音声の解析（Visualizer）は動画アプリの再生やPiPに影響することがあるので、明示的にONにしたときだけ使う
+        if (!prefs.getBoolean("realSpectrum", false) || pipSafe()) return
         if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) != android.content.pm.PackageManager.PERMISSION_GRANTED) return
         try {
             val v = android.media.audiofx.Visualizer(0)
@@ -1080,6 +1090,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
     }
 
     private fun startFace() {
+        if (pipSafe() || mediaPlaying()) { face?.stop(); return }
         val faceOn = prefs.getBoolean("faceOn", true)
         val g = gesturesWanted()
         if ((!faceOn && !g) || scan.isShowing || !resumed) { face?.stop(); return }
@@ -1356,7 +1367,8 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
                 "ドライブモードの車を設定", "ドライブモードを試す",
                 "声のサービス：${if (useEleven()) "ElevenLabs" else "スマホ"}",
                 "顔認識：${if (prefs.getBoolean("faceOn", true)) "ON" else "OFF"}", "${aiName()}が覚えていること", "スキャンモード",
-                "手のジェスチャー：${arrayOf("充電中・ワークショップ時", "常に", "OFF")[prefs.getInt("gestureMode", 0)]}", "外部ディスプレイ表示：${if (prefs.getBoolean("extOn", true)) "ON" else "OFF"}", "パネルの並びを元に戻す", "通知の演出をテスト", "¥ PAY の決済アプリ", "よく使うアプリをスマホ全体の使用時間で判定")) { _, w ->
+                "手のジェスチャー：${arrayOf("充電中・ワークショップ時", "常に", "OFF")[prefs.getInt("gestureMode", 0)]}", "外部ディスプレイ表示：${if (prefs.getBoolean("extOn", true)) "ON" else "OFF"}", "パネルの並びを元に戻す", "通知の演出をテスト", "¥ PAY の決済アプリ", "よく使うアプリをスマホ全体の使用時間で判定",
+                "PiP互換モード：${if (pipSafe()) "ON" else "OFF"}", "音楽リングを実際の音に連動：${if (prefs.getBoolean("realSpectrum", false)) "ON" else "OFF"}")) { _, w ->
                 when (w) {
                     0 -> askApiKey(); 1 -> askName(); 2 -> if (useEleven()) pickElevenVoice() else pickVoice(); 3 -> tuneVoice()
                     4 -> AlertDialog.Builder(this).setTitle("声の加工")
@@ -1390,6 +1402,10 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
                     21 -> handler.postDelayed({ testNotification() }, 800)
                     22 -> pickPayApp()
                     23 -> { toast("一覧から「HUD Launcher」を選んで許可してください"); safeStart(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)) }
+                    24 -> { val v = !pipSafe(); prefs.edit().putBoolean("pipSafe", v).apply()
+                            toast(if (v) "PiP互換モードON：カメラ・マイク・3D描画を止めました" else "PiP互換モードOFF"); recreate() }
+                    25 -> { val v = !prefs.getBoolean("realSpectrum", false); prefs.edit().putBoolean("realSpectrum", v).apply()
+                            if (v) startVisualizer() else stopVisualizer() }
                     14 -> AlertDialog.Builder(this).setTitle("声のサービス")
                         .setItems(arrayOf("ElevenLabs（高品質・要APIキー）", "スマホの読み上げ（無料・オフラインでも可）")) { _, which ->
                             if (which == 0) setupEleven() else { prefs.edit().putString("ttsProvider", "device").apply(); toast("スマホの声に戻しました") }
@@ -1467,6 +1483,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
     }
 
     private fun wakeAllowed(): Boolean {
+        if (pipSafe()) return false
         if (silentMode() && !drive.isShowing) return false
         // 動画・音楽の再生中はマイクを使わない（マイクを開くと動画アプリが一時停止したりPiPが閉じたりするため）
         if (mediaPlaying() && !drive.isShowing) return false
