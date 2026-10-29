@@ -149,7 +149,8 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
         // 他のアプリから戻ったときは、3D描画のレイヤーを毎回作り直す（描画先が失われていても確実に復帰させる）
         if (glPausedAt != 0L) rebuildGl() else glBg.paused = false
         camOwner.resume()
-        startFace()
+        // 動画アプリがPiPに切り替わるのを邪魔しないよう、カメラの起動は少し待つ
+        handler.postDelayed({ if (resumed) startFace() }, 2500)
         applyKeepScreen()
         startVisualizer()
         val enabled = notifAccessEnabled()
