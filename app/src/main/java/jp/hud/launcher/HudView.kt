@@ -65,6 +65,8 @@ class HudView(context: Context) : View(context), SensorEventListener {
         fun onCoreLongPress()
         fun onModuleRect(r: RectF)
         fun onModuleEdit()
+        fun onCalendarRect(r: RectF?)
+        fun onCalendarEdit()
         fun onPanelsAlpha(a: Float)
         fun onScan()
         fun onPay()
@@ -125,6 +127,9 @@ class HudView(context: Context) : View(context), SensorEventListener {
     val lastTouchAt get() = lastTouch
     var moduleLinked = false
         set(v) { field = v; invalidate() }
+    var calendarLinked = false
+        set(v) { field = v; if (width > 0) relayout(width, height) else invalidate() }
+    fun calendarBody(): RectF? = panels["CALENDAR"]?.let { RectF(it.left + unit * 0.35f, it.top + headerH() + unit * 0.25f, it.right - unit * 0.35f, it.bottom - unit * 0.3f) }
     fun moduleBody(): RectF? = panels["MODULE"]?.let { RectF(it.left + unit * 0.35f, it.top + headerH() + unit * 0.25f, it.right - unit * 0.35f, it.bottom - unit * 0.3f) }
     var media: MediaInfo? = null
         set(v) { field = v; invalidate() }
@@ -376,6 +381,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
         ovLayer?.recycle()
         ovLayer = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).also { drawOverlay(Canvas(it), W, H) }
         moduleBody()?.let { listener?.onModuleRect(it) }
+        listener?.onCalendarRect(if (calendarLinked) calendarBody() else null)
         invalidate()
     }
 
@@ -677,13 +683,14 @@ class HudView(context: Context) : View(context), SensorEventListener {
                         postInvalidateOnAnimation()
                     }
                 }
-                if (name != "MODULE") c.concat(panelMatrix(r))
+                val flat = name == "MODULE" || (name == "CALENDAR" && calendarLinked)
+                if (!flat) c.concat(panelMatrix(r))
                 drawPanelBack(c, r)
                 val pad = unit * 0.25f
                 val src = RectF(r.left - pad, r.top - pad, r.right + pad, r.bottom + pad)
                 c.drawBitmap(fg, Rect(src.left.toInt(), src.top.toInt(), src.right.toInt(), src.bottom.toInt()), src, null)
                 sheen(c, r, t, k++)
-                c.save(); if (name != "MODULE") c.translate(dX * 0.07f, dY * 0.07f)
+                c.save(); if (!flat) c.translate(dX * 0.07f, dY * 0.07f)
                 drawPanelContent(c, name, r, t, now)
                 c.restore()
                 c.restore()
@@ -1783,6 +1790,12 @@ class HudView(context: Context) : View(context), SensorEventListener {
     }
 
     private fun drawCalendar(c: Canvas, r: RectF, now: Calendar) {
+        if (calendarLinked && expanded == null) {
+            label.textAlign = Paint.Align.RIGHT; label.textSize = headerH() * 0.42f; label.color = cyan(140); label.letterSpacing = 0.15f
+            c.drawText("LONG-PRESS TO EDIT", r.right - headerH() * 1.6f, r.top + headerH() * 0.66f, label)
+            label.letterSpacing = 0f; label.color = CYAN
+            return
+        }
         val b = body(r)
         val cal = now.clone() as Calendar
         cal.set(Calendar.DAY_OF_MONTH, 1)
@@ -2118,6 +2131,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
         if (inCore(x, y)) { SoundFx.play(SoundFx.Fx.LISTEN); listener?.onClockTap(); return }
         for ((name, r) in panels) if (r.contains(x, y)) {
             if (name == "MODULE") return
+            if (name == "CALENDAR" && calendarLinked) { SoundFx.play(SoundFx.Fx.OPEN); listener?.onPanelTap(name); return }
             SoundFx.play(SoundFx.Fx.OPEN); expand(name); return
         }
         ripples += Ripple(x, y, System.currentTimeMillis()); SoundFx.play(SoundFx.Fx.TAP); invalidate()
@@ -2126,6 +2140,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
     private fun longPress(x: Float, y: Float) {
         segmentAt(x, y)?.app?.let { SoundFx.play(SoundFx.Fx.DONE); listener?.onDockLongPress(it); return }
         panels["MODULE"]?.let { if (it.contains(x, y)) { listener?.onModuleEdit(); return } }
+        panels["CALENDAR"]?.let { if (it.contains(x, y)) { SoundFx.play(SoundFx.Fx.TAP); listener?.onCalendarEdit(); return } }
         if (inCore(x, y)) { SoundFx.play(SoundFx.Fx.TAP); listener?.onCoreLongPress(); return }
         if (y < topStrip.bottom + unit) listener?.onHomeSettings()
     }

@@ -458,20 +458,33 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
         (getSystemService(DISPLAY_SERVICE) as android.hardware.display.DisplayManager).unregisterDisplayListener(displayListener)
     }
 
-    override fun onModuleRect(r: android.graphics.RectF) { moduleRect = android.graphics.RectF(r); placeWidget() }
+    // ウィジェットの置き場所：MODULE（テスラなど）と CALENDAR（TimeTreeなど）
+    private val slotViews = HashMap<String, android.appwidget.AppWidgetHostView>()
+    private val slotRects = HashMap<String, android.graphics.RectF>()
+    private var pendingSlot = "module"
+    private fun slotKey(slot: String) = if (slot == "cal") "calWidgetId" else "widgetId"
+    private fun setLinked(slot: String, v: Boolean) { if (slot == "cal") hud.calendarLinked = v else hud.moduleLinked = v }
 
-    private fun placeWidget() {
-        val v = widgetView ?: return
-        if (moduleRect.isEmpty) return
+    override fun onModuleRect(r: android.graphics.RectF) { slotRects["module"] = android.graphics.RectF(r); placeWidget("module") }
+    override fun onCalendarRect(r: android.graphics.RectF?) {
+        if (r == null) slotRects.remove("cal") else slotRects["cal"] = android.graphics.RectF(r)
+        placeWidget("cal")
+    }
+
+    private fun placeWidget(slot: String) {
+        val v = slotViews[slot] ?: return
+        val rect = slotRects[slot]
+        if (rect == null || rect.isEmpty) { v.visibility = View.GONE; return }
+        v.visibility = View.VISIBLE
         val d = resources.displayMetrics.density
         val info = v.appWidgetInfo
         // ウィジェット本来の高さで描画してから、枠に収まるよう縮小する（詰め込みによる文字の重なり防止）
-        val wantH = maxOf(moduleRect.height(), (info?.minHeight ?: 0).toFloat(), 130 * d)
-        val scale = (moduleRect.height() / wantH).coerceAtMost(1f)
-        val natW = moduleRect.width() / scale
-        val natH = moduleRect.height() / scale
+        val wantH = maxOf(rect.height(), (info?.minHeight ?: 0).toFloat(), 130 * d)
+        val scale = (rect.height() / wantH).coerceAtMost(1f)
+        val natW = rect.width() / scale
+        val natH = rect.height() / scale
         val lp = FrameLayout.LayoutParams(natW.toInt(), natH.toInt())
-        lp.leftMargin = moduleRect.left.toInt(); lp.topMargin = moduleRect.top.toInt()
+        lp.leftMargin = rect.left.toInt(); lp.topMargin = rect.top.toInt()
         v.layoutParams = lp
         v.pivotX = 0f; v.pivotY = 0f
         v.scaleX = scale; v.scaleY = scale
@@ -484,59 +497,67 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
         }
     }
 
-    private fun restoreWidget() {
-        val id = prefs.getInt("widgetId", -1)
-        if (id == -1) { hud.moduleLinked = false; return }
+    private fun restoreWidget() { restoreSlot("module"); restoreSlot("cal") }
+
+    private fun restoreSlot(slot: String) {
+        val id = prefs.getInt(slotKey(slot), -1)
+        if (id == -1) { setLinked(slot, false); return }
         val info = android.appwidget.AppWidgetManager.getInstance(this).getAppWidgetInfo(id)
-        if (info == null) { prefs.edit().remove("widgetId").apply(); hud.moduleLinked = false; return }
-        showWidget(id, info)
+        if (info == null) { prefs.edit().remove(slotKey(slot)).apply(); setLinked(slot, false); return }
+        showWidget(slot, id, info)
     }
 
-    private fun showWidget(id: Int, info: android.appwidget.AppWidgetProviderInfo) {
-        moduleFrame.removeAllViews()
+    private fun showWidget(slot: String, id: Int, info: android.appwidget.AppWidgetProviderInfo) {
+        slotViews.remove(slot)?.let { moduleFrame.removeView(it) }
         val v = widgetHost.createView(applicationContext, id, info)
         v.setAppWidget(id, info)
         moduleFrame.addView(v)
-        widgetView = v
-        prefs.edit().putInt("widgetId", id).apply()
-        hud.moduleLinked = true
-        placeWidget()
+        slotViews[slot] = v
+        if (slot == "module") widgetView = v
+        prefs.edit().putInt(slotKey(slot), id).apply()
+        setLinked(slot, true)
+        placeWidget(slot)
     }
 
-    private fun removeWidget() {
-        val id = prefs.getInt("widgetId", -1)
+    private fun removeWidget(slot: String) {
+        val id = prefs.getInt(slotKey(slot), -1)
         if (id != -1) widgetHost.deleteAppWidgetId(id)
-        prefs.edit().remove("widgetId").apply()
-        moduleFrame.removeAllViews(); widgetView = null
-        hud.moduleLinked = false
+        prefs.edit().remove(slotKey(slot)).apply()
+        slotViews.remove(slot)?.let { moduleFrame.removeView(it) }
+        if (slot == "module") widgetView = null
+        setLinked(slot, false)
     }
 
-    override fun onModuleEdit() {
-        if (prefs.getInt("widgetId", -1) != -1) {
-            AlertDialog.Builder(this).setTitle("MODULE")
-                .setItems(arrayOf("ウィジェットを変更", "ウィジェットを外す")) { _, w -> if (w == 0) pickWidget() else removeWidget() }
+    override fun onModuleEdit() = editSlot("module", "MODULE")
+    override fun onCalendarEdit() = editSlot("cal", "CALENDAR")
+
+    private fun editSlot(slot: String, title: String) {
+        if (prefs.getInt(slotKey(slot), -1) != -1) {
+            AlertDialog.Builder(this).setTitle(title)
+                .setItems(arrayOf("ウィジェットを変更", if (slot == "cal") "ウィジェットを外す（標準のカレンダー表示に戻す）" else "ウィジェットを外す")) { _, w -> if (w == 0) pickWidget(slot) else removeWidget(slot) }
                 .show()
-        } else pickWidget()
+        } else pickWidget(slot)
     }
 
-    private fun pickWidget() {
+    private fun pickWidget(slot: String) {
         val awm = android.appwidget.AppWidgetManager.getInstance(this)
+        val prefer = if (slot == "cal") listOf("timetree", "calendar") else listOf("tesla")
         val providers = awm.installedProviders.sortedWith(compareBy(
-            { if (it.provider.packageName.contains("tesla", true)) 0 else 1 },
+            { p -> prefer.indexOfFirst { p.provider.packageName.contains(it, true) }.let { if (it < 0) 99 else it } },
             { it.loadLabel(packageManager).lowercase() }))
         if (providers.isEmpty()) { toast("追加できるウィジェットがありません"); return }
         val names = providers.map {
             val app = try { packageManager.getApplicationLabel(packageManager.getApplicationInfo(it.provider.packageName, 0)).toString() } catch (e: Exception) { "" }
             "$app ／ ${it.loadLabel(packageManager)}"
         }.toTypedArray()
-        AlertDialog.Builder(this).setTitle("MODULEに入れるウィジェット")
-            .setItems(names) { _, i -> bindWidget(providers[i]) }
+        AlertDialog.Builder(this).setTitle(if (slot == "cal") "CALENDARに入れるウィジェット" else "MODULEに入れるウィジェット")
+            .setItems(names) { _, i -> bindWidget(slot, providers[i]) }
             .setNegativeButton("キャンセル", null).show()
     }
 
-    private fun bindWidget(info: android.appwidget.AppWidgetProviderInfo) {
+    private fun bindWidget(slot: String, info: android.appwidget.AppWidgetProviderInfo) {
         val id = widgetHost.allocateAppWidgetId()
-        pendingWidgetId = id
+        pendingWidgetId = id; pendingSlot = slot
         val awm = android.appwidget.AppWidgetManager.getInstance(this)
         if (awm.bindAppWidgetIdIfAllowed(id, info.profile, info.provider, null)) configureWidget(id)
         else {
@@ -558,10 +579,19 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
     }
 
     private fun finishWidget(id: Int) {
-        val old = prefs.getInt("widgetId", -1)
+        val slot = pendingSlot
+        val old = prefs.getInt(slotKey(slot), -1)
         if (old != -1 && old != id) widgetHost.deleteAppWidgetId(old)
         val info = android.appwidget.AppWidgetManager.getInstance(this).getAppWidgetInfo(id) ?: return
-        showWidget(id, info)
+        showWidget(slot, id, info)
+    }
+
+    /** CALENDARにウィジェットを入れているときは、タップでそのアプリ（TimeTreeなど）を開く */
+    private fun openCalendarApp() {
+        val pkg = slotViews["cal"]?.appWidgetInfo?.provider?.packageName
+        val i = pkg?.let { packageManager.getLaunchIntentForPackage(it) }
+            ?: Intent.makeMainSelectorActivity(Intent.ACTION_MAIN, Intent.CATEGORY_APP_CALENDAR)
+        safeStart(i)
     }
 
     @Deprecated("Deprecated in Java")
@@ -2377,7 +2407,7 @@ ${memories().ifEmpty { listOf("（まだなし）") }.joinToString("\n") { "・$
             "POWER" -> safeStart(Intent(Intent.ACTION_POWER_USAGE_SUMMARY))
             "WEATHER", "FORECAST" -> { lastWeather = 0; fetchWeather(); toast("天気を更新中…") }
             "SYSTEM" -> safeStart(Intent(Settings.ACTION_INTERNAL_STORAGE_SETTINGS))
-            "CALENDAR" -> safeStart(Intent.makeMainSelectorActivity(Intent.ACTION_MAIN, Intent.CATEGORY_APP_CALENDAR))
+            "CALENDAR" -> openCalendarApp()
             "NETWORK" -> safeStart(Intent(Settings.ACTION_WIFI_SETTINGS))
             "MEDIA" -> if (controller != null) onMediaAction("open") else safeStart(Intent.makeMainSelectorActivity(Intent.ACTION_MAIN, Intent.CATEGORY_APP_MUSIC))
         }

@@ -35,6 +35,8 @@ class ExternalHud(outer: Context, display: Display) : Presentation(outer, displa
                 override fun onCoreLongPress() {}
                 override fun onModuleRect(r: RectF) {}
                 override fun onModuleEdit() {}
+                override fun onCalendarRect(r: RectF?) {}
+                override fun onCalendarEdit() {}
                 override fun onPanelsAlpha(a: Float) {}
                 override fun onUserActivity() {}
                 override fun onScan() {}
