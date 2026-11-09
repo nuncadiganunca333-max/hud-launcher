@@ -28,7 +28,14 @@ object TaskStore {
     private fun prefs(ctx: Context) = ctx.getSharedPreferences("hud", Context.MODE_PRIVATE)
 
     fun key(ctx: Context) = prefs(ctx).getString("tasks.key", "") ?: ""
-    fun setKey(ctx: Context, k: String) = prefs(ctx).edit().putString("tasks.key", k.trim()).apply()
+    /** 貼り付けたときに混ざりやすい空白・改行・見えない文字・全角を取り除く */
+    fun cleanKey(k: String): String = java.text.Normalizer.normalize(k, java.text.Normalizer.Form.NFKC)
+        .filter { it in 'A'..'Z' || it in 'a'..'z' || it in '0'..'9' || it == '-' || it == '_' }
+    fun setKey(ctx: Context, k: String) = prefs(ctx).edit().putString("tasks.key", cleanKey(k)).apply()
+
+    /** 最後の同期の結果（パネルに出す）。空なら成功 */
+    fun lastError(ctx: Context) = prefs(ctx).getString("tasks.err", "") ?: ""
+    private fun setError(ctx: Context, e: String) = prefs(ctx).edit().putString("tasks.err", e).apply()
     fun lastSync(ctx: Context) = prefs(ctx).getLong("tasks.syncAt", 0L)
 
     private fun doneSet(ctx: Context): MutableSet<String> = HashSet(prefs(ctx).getStringSet("tasks.done", emptySet()) ?: emptySet())
@@ -116,7 +123,7 @@ object TaskStore {
     }
 
     fun decrypt(keyText: String, body: String): String {
-        val key = try { Base64.decode(keyText.trim(), Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP) }
+        val key = try { Base64.decode(cleanKey(keyText), Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP) }
             catch (e: Exception) { throw SyncError("合言葉の形式が正しくありません") }
         if (key.size != 32) throw SyncError("合言葉の長さが正しくありません")
         val raw = try { Base64.decode(body.trim(), Base64.DEFAULT) } catch (e: Exception) { throw SyncError("届いたデータが壊れています") }
@@ -132,7 +139,12 @@ object TaskStore {
      * まとめを取りに行く（通信するので、メイン以外のスレッドから呼ぶ）。
      * 新しい内容が届いたら true。
      */
-    fun sync(ctx: Context): Boolean {
+    fun sync(ctx: Context): Boolean = try {
+        syncInner(ctx).also { setError(ctx, "") }
+    } catch (e: SyncError) { setError(ctx, e.message ?: "同期できませんでした"); throw e }
+    catch (e: Exception) { setError(ctx, "同期できませんでした（${e.javaClass.simpleName}）"); throw SyncError("同期できませんでした（${e.javaClass.simpleName}）") }
+
+    private fun syncInner(ctx: Context): Boolean {
         val k = key(ctx)
         if (k.isEmpty()) throw SyncError("合言葉が未設定です")
         var changed = false; var got = 0
@@ -152,6 +164,31 @@ object TaskStore {
         if (got == 0) throw SyncError("まだ届いていません")
         prefs(ctx).edit().putLong("tasks.syncAt", System.currentTimeMillis()).apply()
         return changed
+    }
+
+    /** どこで止まっているかを1段ずつ確かめる（通信するので、メイン以外のスレッドから呼ぶ） */
+    fun diagnose(ctx: Context): String {
+        val out = StringBuilder()
+        val k = key(ctx)
+        val kb = try { Base64.decode(k, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP).size } catch (e: Exception) { -1 }
+        out.append(if (kb == 32) "✓ 合言葉：OK（${k.length}文字）\n" else "✕ 合言葉：${if (k.isEmpty()) "未設定" else "形式が違います（${k.length}文字）"}\n")
+        for ((kind, file) in FILES) {
+            val name = if (kind == "morning") "朝のまとめ" else "週のまとめ"
+            try {
+                val con = URL(BASE + file + "?t=" + System.currentTimeMillis()).openConnection() as HttpURLConnection
+                con.connectTimeout = 12000; con.readTimeout = 15000
+                val code = con.responseCode
+                if (code == 404) { out.append("・$name：まだ届いていません\n"); continue }
+                if (code !in 200..299) { out.append("✕ $name：取得失敗（$code）\n"); continue }
+                val body = con.inputStream.bufferedReader().readText()
+                val j = try { JSONObject(decrypt(k, body)) } catch (e: SyncError) { out.append("✕ $name：${e.message}\n"); continue }
+                val n = j.optJSONArray("tasks")?.length() ?: 0
+                out.append("✓ $name：${n}件（${j.optString("updated").take(16).replace('T', ' ')}）\n")
+            } catch (e: Exception) { out.append("✕ $name：通信できません（${e.javaClass.simpleName}：${e.message?.take(60)}）\n") }
+        }
+        val stored = FILES.sumOf { (kind, _) -> payload(ctx, kind)?.optJSONArray("tasks")?.length() ?: 0 }
+        out.append("・この端末に保存済み：${stored}件 ／ 表示中：${all(ctx).size}件")
+        return out.toString()
     }
 
     fun syncAge(ctx: Context): String {

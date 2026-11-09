@@ -140,6 +140,8 @@ class HudView(context: Context) : View(context), SensorEventListener {
         set(v) { field = v; invalidate() }
     var tasksStamp = ""
     var tasksNote = ""
+    var tasksError = ""
+        set(v) { field = v; invalidate() }
     private var tasksPulseAt = 0L
     fun tasksPulse() { tasksPulseAt = System.currentTimeMillis(); wake(); invalidate() }
     private val taskRows = ArrayList<Pair<RectF, String>>()
@@ -2095,11 +2097,18 @@ class HudView(context: Context) : View(context), SensorEventListener {
             postInvalidateOnAnimation()
         }
         val fs = unit * 0.62f
+        if (tasksError.isNotEmpty()) {
+            // 同期に失敗しているときは、パネルの下に赤で理由を出す
+            label.textAlign = Paint.Align.LEFT; label.textSize = fs * 0.7f; label.color = RED
+            taskTp.set(label)
+            c.drawText(android.text.TextUtils.ellipsize("✕ 同期エラー：$tasksError", taskTp, b.width(), android.text.TextUtils.TruncateAt.END).toString(), b.left, b.bottom, label)
+            label.color = CYAN
+        }
         if (tasks.isEmpty()) {
             label.textAlign = Paint.Align.CENTER; label.textSize = fs; label.color = cyan(150)
             c.drawText(tasksNote.ifEmpty { "タスクはありません" }, b.centerX(), b.centerY() + fs * 0.3f, label)
             label.textSize = fs * 0.72f; label.color = cyan(100)
-            c.drawText("タップで開く ／ MENU から追加", b.centerX(), b.centerY() + fs * 1.6f, label)
+            c.drawText("タップでメニュー（同期・追加・診断）", b.centerX(), b.centerY() + fs * 1.6f, label)
             label.color = CYAN; return
         }
         val rowH = fs * (if (big) 2.7f else 1.95f)
@@ -2293,6 +2302,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
         for ((name, r) in panels) if (r.contains(x, y)) {
             if (name == "MODULE") return
             if (name == "CALENDAR" && calendarLinked) { SoundFx.play(SoundFx.Fx.OPEN); listener?.onPanelTap(name); return }
+            if (name == "TASKS" && tasks.isEmpty()) { SoundFx.play(SoundFx.Fx.OPEN); listener?.onPanelTap(name); return }
             SoundFx.play(SoundFx.Fx.OPEN); expand(name); return
         }
         ripples += Ripple(x, y, System.currentTimeMillis()); SoundFx.play(SoundFx.Fx.TAP); invalidate()

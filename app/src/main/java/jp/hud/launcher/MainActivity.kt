@@ -2539,6 +2539,7 @@ ${memories().ifEmpty { listOf("（まだなし）") }.joinToString("\n") { "・$
         hud.tasks = TaskStore.all(this)
         hud.tasksStamp = TaskStore.stamp(this)
         hud.tasksNote = if (TaskStore.key(this).isEmpty()) "同期の合言葉が未設定です" else "タスクはありません"
+        hud.tasksError = TaskStore.lastError(this)
     }
 
     private fun syncTasks(manual: Boolean) {
@@ -2555,8 +2556,22 @@ ${memories().ifEmpty { listOf("（まだなし）") }.joinToString("\n") { "・$
                     val open = hud.tasks.count { !it.done }
                     if (!manual && canSpeakProactive() && prefs.getBoolean("voice", true) && open > 0) announce("新しいまとめが届きました。対応事項は${open}件です。")
                 }
-                if (manual) toast(msg ?: if (changed) "新しいまとめを受け取りました" else "最新の状態です")
+                if (manual) {
+                    val n = hud.tasks.size
+                    AlertDialog.Builder(this).setTitle(if (msg == null) "同期しました" else "同期できませんでした")
+                        .setMessage(msg ?: (if (changed) "新しいまとめを受け取りました。" else "最新の状態です。") + "\nTASKSに表示中：${n}件")
+                        .setPositiveButton("OK", null)
+                        .setNeutralButton("診断") { _, _ -> diagnoseTasks() }.show()
+                }
             }
+        }
+    }
+
+    private fun diagnoseTasks() {
+        toast("確認しています…")
+        thread {
+            val r = try { TaskStore.diagnose(this) } catch (e: Exception) { "診断できませんでした（${e.javaClass.simpleName}）" }
+            runOnUiThread { refreshTasks(); AlertDialog.Builder(this).setTitle("同期の診断").setMessage(r).setPositiveButton("OK", null).show() }
         }
     }
 
@@ -2581,12 +2596,13 @@ ${memories().ifEmpty { listOf("（まだなし）") }.joinToString("\n") { "・$
     private fun tasksMenu() {
         val last = TaskStore.syncAge(this)
         AlertDialog.Builder(this).setTitle("TASKS")
-            .setItems(arrayOf("タスクを追加", "今すぐ同期" + (if (last.isNotEmpty()) "（最終：$last）" else ""), "完了した自分のタスクを消す", "同期の合言葉を設定")) { _, w ->
+            .setItems(arrayOf("タスクを追加", "今すぐ同期" + (if (last.isNotEmpty()) "（最終：$last）" else ""), "完了した自分のタスクを消す", "同期の合言葉を設定", "同期を診断")) { _, w ->
                 when (w) {
                     0 -> askNewTask()
-                    1 -> if (TaskStore.key(this).isEmpty()) askTaskKey() else { toast("同期中…"); syncTasks(manual = true) }
+                    1 -> if (TaskStore.key(this).isEmpty()) askTaskKey() else syncTasks(manual = true)
                     2 -> { val n = TaskStore.clearDone(this); refreshTasks(); toast(if (n > 0) "${n}件消しました" else "消すタスクはありません") }
                     3 -> askTaskKey()
+                    4 -> diagnoseTasks()
                 }
             }.show()
     }
