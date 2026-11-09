@@ -17,6 +17,7 @@ data class NotifItem(
     val autoCancel: Boolean,
     val time: Long,
     val reply: Notification.Action? = null,
+    val category: String? = null,
 )
 
 class NotifService : NotificationListenerService() {
@@ -73,7 +74,7 @@ class NotifService : NotificationListenerService() {
 
         val replyAction = n.actions?.firstOrNull { a -> a.remoteInputs?.any { it.allowFreeFormInput } == true }
         val item = NotifItem(sbn.key, sbn.packageName, label, title, text, n.contentIntent,
-            n.flags and Notification.FLAG_AUTO_CANCEL != 0, now, replyAction)
+            n.flags and Notification.FLAG_AUTO_CANCEL != 0, now, replyAction, n.category)
 
         main.post {
             val s = sink

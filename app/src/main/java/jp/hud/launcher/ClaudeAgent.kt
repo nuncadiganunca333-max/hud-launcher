@@ -142,6 +142,10 @@ class ClaudeAgent(var apiKey: String, var model: String = "claude-haiku-5-5") {
                     JSONObject().put("keyword", str("忘れる内容のキーワード")), listOf("keyword")))
                 .put(tool("open_pay", "決済アプリ（PayPayなど）を開く。action=pay はバーコード支払い画面、scan はスキャン画面、menu は支払いモジュールの画面、app はアプリのトップ。",
                     JSONObject().put("action", JSONObject().put("type", "string").put("enum", JSONArray(listOf("pay", "scan", "menu", "app")))), listOf("action")))
+                .put(tool("add_task", "ホーム画面のTASKSパネルに、やることを1件追加する。「〜をタスクに入れて」「〜を忘れないように」と言われたときに使う。",
+                    JSONObject().put("text", str("タスクの内容（短く）")), listOf("text")))
+                .put(tool("complete_task", "TASKSパネルの未完了タスクのうち、キーワードに合うものを完了にする。",
+                    JSONObject().put("keyword", str("完了にするタスクに含まれる言葉")), listOf("keyword")))
                 .put(tool("call_contact", "連絡先の相手に電話をかける。nameは連絡先の名前。",
                     JSONObject().put("name", str("相手の名前")), listOf("name")))
         }

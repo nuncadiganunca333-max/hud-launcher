@@ -71,6 +71,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
         fun onScan()
         fun onPay()
         fun onUserActivity()
+        fun onTaskToggle(id: String) {}
     }
 
     var listener: Listener? = null
@@ -133,6 +134,19 @@ class HudView(context: Context) : View(context), SensorEventListener {
     fun moduleBody(): RectF? = panels["MODULE"]?.let { RectF(it.left + unit * 0.35f, it.top + headerH() + unit * 0.25f, it.right - unit * 0.35f, it.bottom - unit * 0.3f) }
     var media: MediaInfo? = null
         set(v) { field = v; invalidate() }
+
+    // ---- TASKS パネル ----
+    var tasks: List<TaskItem> = emptyList()
+        set(v) { field = v; invalidate() }
+    var tasksStamp = ""
+    var tasksNote = ""
+    private var tasksPulseAt = 0L
+    fun tasksPulse() { tasksPulseAt = System.currentTimeMillis(); wake(); invalidate() }
+    private val taskRows = ArrayList<Pair<RectF, String>>()
+    private var drawingExpanded = false
+    private val taskTp = android.text.TextPaint(Paint.ANTI_ALIAS_FLAG)
+    private val appsBtn = RectF()
+    private var incomingColor = Color.rgb(120, 222, 255)
 
     // launch flash
     private var flashRect: RectF? = null
@@ -262,6 +276,8 @@ class HudView(context: Context) : View(context), SensorEventListener {
                 dragging = false; invalidate(); return true
             }
             val start = e1 ?: return false
+            // 画面の下のほうから上へ払うと、どこからでもアプリ一覧
+            if (start.y > height * 0.84f && vy < -900 && abs(vy) > abs(vx)) { SoundFx.play(SoundFx.Fx.OPEN); listener?.onOpenDrawer(); return true }
             val panel = panels.entries.firstOrNull { it.key != "MODULE" && it.value.contains(start.x, start.y) }?.key
             if (panel != null && max(abs(vx), abs(vy)) > 1500) {
                 if (abs(vx) > abs(vy)) flingPanel(panel, if (vx > 0) 1 else -1, 0) else flingPanel(panel, 0, if (vy > 0) 1 else -1)
@@ -317,7 +333,8 @@ class HudView(context: Context) : View(context), SensorEventListener {
         val gap = unit * 0.45f
         topStrip.set(m, insetTop + unit * 0.4f, W - m, insetTop + unit * 1.8f)
         val top = topStrip.bottom + unit * 0.8f
-        val bottom = H - insetBottom - unit * 0.6f
+        val bottom = H - insetBottom - unit * 1.75f
+        appsBtn.set(W / 2 - unit * 3.2f, bottom + unit * 0.3f, W / 2 + unit * 3.2f, bottom + unit * 1.45f)
 
         if (workshop) {
             // 上：ホログラム（コア＋左右のパネル）／下：操作コンソール
@@ -337,7 +354,8 @@ class HudView(context: Context) : View(context), SensorEventListener {
             col(1).let { (a, b) -> panels["MEDIA"] = RectF(a, lowTop, b, r1b) }
             col(2).let { (a, b) -> panels["POWER"] = RectF(a, lowTop, b, r1b) }
             col(3).let { (a, b) -> panels["MODULE"] = RectF(a, lowTop, b, bottom) }
-            col(0, 3).let { (a, b) -> panels["NETWORK"] = RectF(a, r2t, b, bottom) }
+            col(0, 2).let { (a, b) -> panels["NETWORK"] = RectF(a, r2t, b, bottom) }
+            col(2).let { (a, b) -> panels["TASKS"] = RectF(a, r2t, b, bottom) }
             statusStrip.setEmpty()
         } else if (wide) {
             val colBottom = top + (bottom - top) * 0.78f
@@ -348,7 +366,8 @@ class HudView(context: Context) : View(context), SensorEventListener {
             panels["CALENDAR"] = RectF(rx1, top, W - m, top + lh * 0.36f - gap / 2)
             panels["WEATHER"] = RectF(rx1, top + lh * 0.36f + gap / 2, W - m, top + lh * 0.76f - gap / 2)
             panels["MEDIA"] = RectF(rx1, top + lh * 0.76f + gap / 2, W - m, colBottom)
-            panels["NETWORK"] = RectF(m, colBottom + gap, W - m, bottom)
+            panels["NETWORK"] = RectF(m, colBottom + gap, W * 0.5f - gap / 2, bottom)
+            panels["TASKS"] = RectF(W * 0.5f + gap / 2, colBottom + gap, W - m, bottom)
             val modTop = colBottom - unit * 8f
             panels["MODULE"] = RectF(W * 0.28f, modTop, W * 0.72f, colBottom)
             statusStrip.setEmpty()
@@ -362,12 +381,13 @@ class HudView(context: Context) : View(context), SensorEventListener {
             val pTop = cy + coreR * 1.24f
             val ph = bottom - pTop
             val mid = W / 2
-            val r1 = pTop + ph * 0.37f; val r2 = pTop + ph * 0.71f
+            val r1 = pTop + ph * 0.26f; val r2 = pTop + ph * 0.54f; val r3 = pTop + ph * 0.75f
             panels["SYSTEM"] = RectF(m, pTop, mid - gap / 2, r1 - gap / 2)
             panels["WEATHER"] = RectF(mid + gap / 2, pTop, W - m, r1 - gap / 2)
             panels["MEDIA"] = RectF(m, r1 + gap / 2, mid - gap / 2, r2 - gap / 2)
             panels["CALENDAR"] = RectF(mid + gap / 2, r1 + gap / 2, W - m, r2 - gap / 2)
-            panels["MODULE"] = RectF(m, r2 + gap / 2, W - m, bottom)
+            panels["TASKS"] = RectF(m, r2 + gap / 2, W - m, r3 - gap / 2)
+            panels["MODULE"] = RectF(m, r3 + gap / 2, W - m, bottom)
             statusStrip.setEmpty()
         }
         applySavedOrder()
@@ -577,7 +597,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
         postInvalidateOnAnimation()
     }
 
-    fun incoming() { incomingAt = System.currentTimeMillis(); wake(); invalidate() }
+    fun incoming(color: Int = Color.rgb(120, 222, 255)) { incomingColor = color; incomingAt = System.currentTimeMillis(); wake(); invalidate() }
 
     fun wake() { lastTouch = System.currentTimeMillis() }
 
@@ -705,6 +725,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
         }
 
         ovLayer?.let { c.drawBitmap(it, 0f, 0f, null) }
+        if (interactive && expanded == null) drawAppsBtn(c, t, pb)
         drawRipples(c, nowMs)
         drawIncoming(c, nowMs)
         if (idleP < 0.3f && expanded == null) {
@@ -740,7 +761,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
         drawOpening(c, nowMs)
 
         if (running) {
-            val anim = boot < 1f || (openingAt != 0L && nowMs - openingAt < 3200) || expanded != null || ripples.isNotEmpty() || nowMs - incomingAt < 800 || abs(idleP - idleTarget) > 0.01f
+            val anim = boot < 1f || (openingAt != 0L && nowMs - openingAt < 3200) || expanded != null || ripples.isNotEmpty() || nowMs - incomingAt < 1300 || abs(idleP - idleTarget) > 0.01f
             when { anim -> postInvalidateOnAnimation(); idleP > 0.9f -> postInvalidateDelayed(if (lowPower) 160 else 66); else -> postInvalidateDelayed(if (lowPower) 60 else 40) }
         }
     }
@@ -751,6 +772,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
             "CALENDAR" -> drawCalendar(c, r, now); "WEATHER" -> drawWeather(c, r, t)
             "MEDIA" -> drawMedia(c, r, t); "MODULE" -> drawModule(c, r, t)
             "NETWORK" -> drawNetwork(c, r, t)
+            "TASKS" -> drawTasks(c, r, t)
         }
     }
 
@@ -887,25 +909,64 @@ class HudView(context: Context) : View(context), SensorEventListener {
     // ===== ⑫ incoming notification streaks =====
     private fun drawIncoming(c: Canvas, nowMs: Long) {
         val age = (nowMs - incomingAt) / 650f
-        if (age < 0f || age > 1.2f) return
+        if (age < 0f || age > 1.9f) return
+        val col = incomingColor
+        val W = width.toFloat(); val H = height.toFloat()
+        // 画面のふちが光り、角のブラケットが内側へ締まる
+        val edge = (1f - age / 1.9f).coerceIn(0f, 1f)
+        val inset = unit * (0.3f + 1.2f * ease(min(1f, age)))
+        glow.strokeWidth = 14f; glow.color = withA(col, (150 * edge).toInt())
+        c.drawRect(inset, inset, W - inset, H - inset, glow)
+        stroke.strokeWidth = 4f; stroke.color = withA(col, (230 * edge).toInt())
+        val a = unit * 2.4f
+        for ((x, y, sx, sy) in listOf(floatArrayOf(inset, inset, 1f, 1f), floatArrayOf(W - inset, inset, -1f, 1f),
+            floatArrayOf(inset, H - inset, 1f, -1f), floatArrayOf(W - inset, H - inset, -1f, -1f)).map { Quad4(it[0], it[1], it[2], it[3]) }) {
+            c.drawLine(x, y, x + sx * a, y, stroke); c.drawLine(x, y, x, y + sy * a, stroke)
+        }
+        // 上下のふちを、中央へ向かって走る矢印
+        if (age < 1.3f) {
+            val q = age / 1.3f
+            label.textSize = unit * 0.7f; label.textAlign = Paint.Align.CENTER
+            for (k in 0 until 5) {
+                val d = (1f - q) * W * 0.5f + k * unit * 1.1f
+                label.color = withA(col, (220 * (1f - k / 5f) * (1f - q)).toInt())
+                c.drawText("›", W / 2 - d, inset + unit * 0.75f, label); c.drawText("‹", W / 2 + d, inset + unit * 0.75f, label)
+                c.drawText("›", W / 2 - d, H - inset - unit * 0.2f, label); c.drawText("‹", W / 2 + d, H - inset - unit * 0.2f, label)
+            }
+            label.color = CYAN
+        }
+        // 光の線がコアへ飛び込む
         val rnd = Random(incomingAt)
-        repeat(10) {
+        repeat(14) {
             val ang = rnd.nextFloat() * 2 * PI.toFloat()
-            val d0 = hypot(width.toFloat(), height.toFloat()) * 0.7f
+            val d0 = hypot(W, H) * 0.7f
             val delay = rnd.nextFloat() * 0.3f
             val q = ((age - delay) / 0.7f).coerceIn(0f, 1f)
             if (q <= 0f || q >= 1f) return@repeat
             val head = d0 * (1 - ease(q)); val tail = d0 * (1 - ease((q - 0.25f).coerceAtLeast(0f)))
             val hx = cx + cos(ang) * head; val hy = cy + sin(ang) * head
             val txp = cx + cos(ang) * tail; val typ = cy + sin(ang) * tail
-            glow.strokeWidth = 10f; glow.color = cyan(180); c.drawLine(txp, typ, hx, hy, glow)
+            glow.strokeWidth = 10f; glow.color = withA(col, 180); c.drawLine(txp, typ, hx, hy, glow)
             stroke.strokeWidth = 3f; stroke.color = Color.WHITE; c.drawLine(txp, typ, hx, hy, stroke)
         }
+        // コアが受け止めて、衝撃波が二重に広がる
         if (age > 0.7f) {
-            val q = ((age - 0.7f) / 0.5f).coerceIn(0f, 1f)
-            glow.strokeWidth = 20f; glow.color = cyan((255 * (1 - q)).toInt()); c.drawCircle(cx, cy, coreR * (0.5f + q), glow)
+            for (k in 0 until 2) {
+                val q = ((age - 0.7f - k * 0.18f) / 0.8f).coerceIn(0f, 1f)
+                if (q <= 0f) continue
+                glow.strokeWidth = 20f - 8f * k; glow.color = withA(col, (255 * (1 - q)).toInt())
+                c.drawCircle(cx, cy, coreR * (0.5f + q * (1.3f + k * 0.9f)), glow)
+                stroke.strokeWidth = 2f; stroke.color = withA(col, (200 * (1 - q)).toInt())
+                c.drawCircle(cx, cy, coreR * (0.5f + q * (1.3f + k * 0.9f)), stroke)
+            }
+            // コアのまわりに回転するロックオン
+            val q = ((age - 0.7f) / 1.0f).coerceIn(0f, 1f)
+            stroke.strokeWidth = 5f; stroke.color = withA(col, (255 * (1 - q)).toInt())
+            val rr = RectF(cx - coreR * 1.12f, cy - coreR * 1.12f, cx + coreR * 1.12f, cy + coreR * 1.12f)
+            for (k in 0 until 4) c.drawArc(rr, q * 260f + k * 90f, 34f, false, stroke)
         }
     }
+    private data class Quad4(val a: Float, val b: Float, val c: Float, val d: Float)
 
     // ===== ⑥ expanded panel =====
     private fun expand(name: String) { expanded = name; expandAt = System.currentTimeMillis(); collapsing = false; invalidate() }
@@ -929,7 +990,9 @@ class HudView(context: Context) : View(context), SensorEventListener {
             c.save(); c.clipRect(expandRect)
             val savedUnit = unit
             unit = savedUnit * 1.35f
+            drawingExpanded = true
             drawPanelContent(c, name, inner, t, now)
+            drawingExpanded = false
             unit = savedUnit
             c.restore()
             // footer: open + close
@@ -938,9 +1001,9 @@ class HudView(context: Context) : View(context), SensorEventListener {
             fill.color = cyan(55); c.drawRect(expandOpenBtn, fill)
             stroke.strokeWidth = 2.5f; stroke.color = CYAN; c.drawRect(expandOpenBtn, stroke)
             label.textAlign = Paint.Align.CENTER; label.textSize = fh * 0.42f; label.letterSpacing = 0.25f; label.color = CYAN
-            c.drawText("OPEN  ▸", expandOpenBtn.centerX(), expandOpenBtn.centerY() + label.textSize * 0.36f, label)
+            c.drawText(if (name == "TASKS") "MENU  ▸" else "OPEN  ▸", expandOpenBtn.centerX(), expandOpenBtn.centerY() + label.textSize * 0.36f, label)
             label.textAlign = Paint.Align.LEFT; label.textSize = fh * 0.36f; label.color = cyan(140)
-            c.drawText("◂  TAP ANYWHERE TO CLOSE", expandRect.left + unit * 0.8f, expandOpenBtn.centerY() + label.textSize * 0.36f, label)
+            c.drawText(if (name == "TASKS") "◂  TAP A TASK TO CHECK  /  OUTSIDE TO CLOSE" else "◂  TAP ANYWHERE TO CLOSE", expandRect.left + unit * 0.8f, expandOpenBtn.centerY() + label.textSize * 0.36f, label)
             label.letterSpacing = 0f; label.color = CYAN
         }
     }
@@ -2012,6 +2075,102 @@ class HudView(context: Context) : View(context), SensorEventListener {
         }
     }
 
+    private fun drawTasks(c: Canvas, r: RectF, t: Float) {
+        val big = drawingExpanded
+        if (big) taskRows.clear()
+        val b = body(r)
+        val nowMs = System.currentTimeMillis()
+        val open = tasks.count { !it.done }
+        // 見出しの右：残り件数と、まとめが届いた時刻
+        val hh = if (big) headerH() / 1.35f else headerH()
+        label.textAlign = Paint.Align.RIGHT; label.textSize = hh * 0.46f; label.letterSpacing = 0.12f
+        label.color = if (open > 0) cyan(190) else cyan(120)
+        val hd = (if (tasks.isEmpty()) "" else if (open > 0) "$open OPEN" else "ALL CLEAR") + (if (tasksStamp.isNotEmpty()) "   SYNC $tasksStamp" else "")
+        c.drawText(hd, r.right - hh * 1.6f, r.top + hh * 0.68f, label)
+        label.letterSpacing = 0f; label.color = CYAN
+        // 新しいまとめが届いた直後は枠が光る
+        if (!big && nowMs - tasksPulseAt < 2600) {
+            val q = (nowMs - tasksPulseAt) / 2600f
+            glow.strokeWidth = 14f; glow.color = cyan((200 * (1f - q) * (0.6f + 0.4f * sin(q * 30f))).toInt()); c.drawRect(r, glow)
+            postInvalidateOnAnimation()
+        }
+        val fs = unit * 0.62f
+        if (tasks.isEmpty()) {
+            label.textAlign = Paint.Align.CENTER; label.textSize = fs; label.color = cyan(150)
+            c.drawText(tasksNote.ifEmpty { "タスクはありません" }, b.centerX(), b.centerY() + fs * 0.3f, label)
+            label.textSize = fs * 0.72f; label.color = cyan(100)
+            c.drawText("タップで開く ／ MENU から追加", b.centerX(), b.centerY() + fs * 1.6f, label)
+            label.color = CYAN; return
+        }
+        val rowH = fs * (if (big) 2.7f else 1.95f)
+        val maxRows = ((b.height() + fs * 0.3f) / rowH).toInt().coerceAtLeast(1)
+        val show = if (tasks.size > maxRows) tasks.take((maxRows - 1).coerceAtLeast(1)) else tasks
+        var y = b.top
+        for (task in show) {
+            val col = when { task.done -> cyan(90); task.tier == 1 -> RED; else -> CYAN }
+            val box = fs * 0.95f
+            val by = y + (rowH - box) / 2
+            if (task.tier == 1 && !task.done) {
+                fill.color = withA(RED, (40 + 30 * sin(t * 5f)).toInt()); c.drawRect(b.left, by, b.left + box, by + box, fill)
+            }
+            stroke.strokeWidth = 2.2f; stroke.color = col
+            c.drawRect(b.left, by, b.left + box, by + box, stroke)
+            if (task.done) {
+                c.drawLine(b.left + box * 0.2f, by + box * 0.55f, b.left + box * 0.42f, by + box * 0.78f, stroke)
+                c.drawLine(b.left + box * 0.42f, by + box * 0.78f, b.left + box * 0.84f, by + box * 0.2f, stroke)
+            }
+            val tag = when (task.tier) { 1 -> "急ぎ"; 2 -> "今日"; 3 -> "今週"; 4 -> "来週"; else -> "自分" }
+            val tx0 = b.left + box + fs * 0.5f
+            label.textAlign = Paint.Align.LEFT; label.textSize = fs * 0.7f; label.color = withA(col, if (task.done) 110 else 210)
+            val twTag = label.measureText("今週") + fs * 0.55f
+            val showMeta = big && task.meta.isNotEmpty()
+            val baseY = if (showMeta) y + rowH * 0.42f else y + rowH * 0.5f + fs * 0.34f
+            c.drawText(tag, tx0, baseY - fs * 0.04f, label)
+            label.textSize = fs; label.color = if (task.done) cyan(95) else Color.argb(240, 215, 245, 255)
+            val avail = (b.right - (tx0 + twTag)).coerceAtLeast(10f)
+            taskTp.set(label)
+            val txt = android.text.TextUtils.ellipsize(task.text, taskTp, avail, android.text.TextUtils.TruncateAt.END).toString()
+            c.drawText(txt, tx0 + twTag, baseY, label)
+            if (task.done) {
+                stroke.strokeWidth = 1.5f; stroke.color = cyan(110)
+                c.drawLine(tx0 + twTag, baseY - fs * 0.32f, tx0 + twTag + label.measureText(txt), baseY - fs * 0.32f, stroke)
+            }
+            if (showMeta) {
+                label.textSize = fs * 0.66f; label.color = cyan(if (task.done) 80 else 150)
+                taskTp.set(label)
+                c.drawText(android.text.TextUtils.ellipsize(task.meta, taskTp, avail, android.text.TextUtils.TruncateAt.END).toString(), tx0 + twTag, y + rowH * 0.8f, label)
+            }
+            if (big) {
+                taskRows += RectF(r.left, y, r.right, y + rowH) to task.id
+                stroke.strokeWidth = 1f; stroke.color = cyan(30); c.drawLine(b.left, y + rowH, b.right, y + rowH, stroke)
+            }
+            y += rowH
+        }
+        if (show.size < tasks.size) {
+            label.textAlign = Paint.Align.LEFT; label.textSize = fs * 0.7f; label.letterSpacing = 0.12f; label.color = cyan(150)
+            c.drawText("+ ${tasks.size - show.size} MORE" + (if (big) "" else "  ―  TAP TO EXPAND"), b.left, y + rowH * 0.5f + fs * 0.25f, label)
+            label.letterSpacing = 0f
+        }
+        label.color = CYAN
+    }
+
+    /** 画面下の「APPS」タブ（タップ・上スワイプでアプリ一覧） */
+    private fun drawAppsBtn(c: Canvas, t: Float, alpha: Float) {
+        if (alpha <= 0.02f || appsBtn.isEmpty) return
+        val r = appsBtn
+        val k = r.height() * 0.45f
+        val p = Path().apply {
+            moveTo(r.left + k, r.top); lineTo(r.right - k, r.top); lineTo(r.right, r.bottom); lineTo(r.left, r.bottom); close()
+        }
+        fill.color = Color.argb((150 * alpha).toInt(), 4, 30, 50); c.drawPath(p, fill)
+        glow.strokeWidth = 8f; glow.color = cyan((90 * alpha).toInt()); c.drawPath(p, glow)
+        stroke.strokeWidth = 2f; stroke.color = cyan((220 * alpha).toInt()); c.drawPath(p, stroke)
+        label.textAlign = Paint.Align.CENTER; label.textSize = r.height() * 0.5f; label.letterSpacing = 0.3f
+        label.color = cyan(((190 + 60 * sin(t * 2.2f)) * alpha).toInt())
+        c.drawText("▲  APPS", r.centerX(), r.centerY() + label.textSize * 0.36f, label)
+        label.letterSpacing = 0f; label.color = CYAN
+    }
+
     private fun drawModule(c: Canvas, r: RectF, t: Float) {
         val b = moduleBody() ?: return
         label.textAlign = Paint.Align.RIGHT; label.textSize = headerH() * 0.42f; label.color = cyan(140); label.letterSpacing = 0.15f
@@ -2088,6 +2247,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
             if (e.action == MotionEvent.ACTION_UP && !collapsing) {
                 val name = expanded!!
                 if (expandOpenBtn.contains(e.x, e.y)) { SoundFx.play(SoundFx.Fx.OPEN); listener?.onPanelTap(name); collapse() }
+                else if (name == "TASKS" && taskRows.firstOrNull { it.first.contains(e.x, e.y) }?.let { SoundFx.play(SoundFx.Fx.DONE); listener?.onTaskToggle(it.second); true } == true) { }
                 else if (name == "MEDIA" && media != null && mediaBtns.entries.firstOrNull { it.value.contains(e.x, e.y) }?.let { SoundFx.play(SoundFx.Fx.TAP); listener?.onMediaAction(it.key); true } == true) { }
                 else { SoundFx.play(SoundFx.Fx.BACK); collapse() }
             }
@@ -2107,6 +2267,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
     }
 
     private fun tap(x: Float, y: Float) {
+        if (appsBtn.contains(x, y) || (y > appsBtn.top - unit * 0.2f && abs(x - width / 2f) < unit * 4.5f)) { SoundFx.play(SoundFx.Fx.OPEN); listener?.onOpenDrawer(); return }
         if (y < topStrip.bottom + unit * 0.5f && x < width * 0.5f) { SoundFx.play(SoundFx.Fx.TAP); listener?.onTopStripTap(); return }
         segmentAt(x, y)?.let { s ->
             when {

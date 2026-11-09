@@ -55,6 +55,13 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
     private lateinit var freqRow: LinearLayout
     private var apps: List<AppEntry> = emptyList()
     private var filtered: List<AppEntry> = emptyList()
+    private var appCat: Map<String, Int> = emptyMap()
+    private var appText: Map<String, String> = emptyMap()
+    private var appGroup: Map<String, String> = emptyMap()
+    private var catSel = 0
+    private lateinit var chipRow: LinearLayout
+    private lateinit var indexBar: IndexBar
+    private lateinit var freqTitle: TextView
     private val handler = Handler(Looper.getMainLooper())
     private var lastWeather = 0L
     private lateinit var alert: AlertOverlay
@@ -195,6 +202,8 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
         if (talkRequested) { talkRequested = false; intent = Intent(this, MainActivity::class.java); handler.postDelayed({ startAssistant() }, 250) }
         else { wakeDeadline = System.currentTimeMillis() + WAKE_WINDOW_MS + 1500; startWake(1500) }
         handler.postDelayed({ maybeMorningBriefing() }, 3200)
+        refreshTasks()
+        if (TaskStore.key(this).isNotEmpty() && System.currentTimeMillis() - lastTaskSyncTry > 10 * 60 * 1000) syncTasks(manual = false)
         NotifService.sink = { onNotif(it, live = true) }
         startMedia()
         // ホーム以外にいた間に届いた通知（10分以内）
@@ -292,7 +301,12 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
         closeDrawer()
         if (speak) {
             // 光の線がコアに飛び込んでから警告パネルを開く
-            hud.incoming(); SoundFx.play(SoundFx.Fx.ALERT)
+            val kind = NotifKind.of(n)
+            hud.incoming(kind.color)
+            SoundFx.play(when (kind) {
+                NotifKind.MAIL -> SoundFx.Fx.ALERT_MAIL; NotifKind.CALL -> SoundFx.Fx.ALERT_URGENT
+                NotifKind.SCHEDULE, NotifKind.SYSTEM -> SoundFx.Fx.ALERT_SOFT; else -> SoundFx.Fx.ALERT
+            })
             handler.postDelayed({
                 if (alertQueue.firstOrNull()?.key != n.key) return@postDelayed
                 alert.show(n, alertQueue.size - 1)
@@ -368,7 +382,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
     override fun onAlertOpen(item: NotifItem, src: android.graphics.Rect?) {
         stopSpeech(); if (alert.listening) { recognizer?.cancel(); alert.listening = false }
         alertQueue.removeAll { it.key == item.key }
-        alert.hide()
+        alert.hide(opened = true)
         var ok = false
         item.intent?.let {
             try {
@@ -406,10 +420,19 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
     // ---------- apps ----------
     private fun loadApps() {
         val i = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+        val cats = HashMap<String, Int>(); val texts = HashMap<String, String>(); val groups = HashMap<String, String>()
         apps = packageManager.queryIntentActivities(i, 0)
             .filter { it.activityInfo.packageName != packageName }
-            .map { AppEntry(it.loadLabel(packageManager).toString(), it.activityInfo.packageName, it.activityInfo.name) }
-            .sortedBy { it.label.lowercase() }
+            .map { ri ->
+                AppEntry(ri.loadLabel(packageManager).toString(), ri.activityInfo.packageName, ri.activityInfo.name).also { a ->
+                    cats[a.key] = AppText.categoryOf(a.label, a.pkg, ri.activityInfo.applicationInfo?.category ?: -1)
+                    texts[a.key] = AppText.searchText(a.label, a.pkg)
+                    groups[a.key] = AppText.groupOf(a.label)
+                }
+            }
+            // 索引の順（記号 → ABC → あかさたな → 漢字）に並べる
+            .sortedWith(compareBy({ AppText.GROUPS.indexOf(groups[it.key] ?: "#") }, { AppText.norm(it.label) }))
+        appCat = cats; appText = texts; appGroup = groups
         applyFilter()
         refreshDock()
     }
@@ -434,7 +457,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
     }
 
     private fun launch(app: AppEntry, src: android.graphics.Rect? = null, delayMs: Long = 0) {
-        prefs.edit().putInt("cnt:" + app.key, countOf(app) + 1).apply()
+        prefs.edit().putInt("cnt:" + app.key, countOf(app) + 1).putLong("last:" + app.key, System.currentTimeMillis()).apply()
         val go = Runnable {
             try {
                 val opts = src?.let {
@@ -970,12 +993,17 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
     }
 
     /** 通知の演出を試す（本物の通知と同じ流れ） */
+    private var testSeq = 0
     private fun testNotification() {
         val line = "jp.naver.line.android"
         val hasLine = try { packageManager.getApplicationInfo(line, 0); true } catch (e: Exception) { false }
-        val item = NotifItem("hud-test-" + System.currentTimeMillis(), if (hasLine) line else packageName,
-            if (hasLine) "LINE" else "HUD TEST", "${aiName()}", "これは通知演出のテストです。届くとこのように表示されます。",
-            null, false, System.currentTimeMillis())
+        // 試すたびに、メッセージ → メール → 予定 → 緊急 の順で種類が変わる
+        val cat = arrayOf("msg", "email", "event", "call")[testSeq % 4]
+        val what = arrayOf("メッセージ", "メール", "予定", "緊急")[testSeq % 4]
+        testSeq++
+        val item = NotifItem("hud-test-" + System.currentTimeMillis(), if (hasLine && cat == "msg") line else packageName,
+            if (hasLine && cat == "msg") "LINE" else "HUD TEST", "${aiName()}", "これは「$what」の通知演出のテストです。もう一度試すと、次の種類と別の登場演出に切り替わります。",
+            null, false, System.currentTimeMillis(), null, cat)
         onNotif(item, live = true)
     }
 
@@ -1154,6 +1182,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
             e.hud.stats = hud.stats; e.hud.media = hud.media; e.hud.dock = hud.dock
             e.hud.geoLat = hud.geoLat; e.hud.geoLon = hud.geoLon; e.hud.userTag = hud.userTag
             e.hud.notifLink = hud.notifLink; e.hud.speaking = hud.speaking; e.hud.thinking = hud.thinking
+            if (e.hud.tasks !== hud.tasks) { e.hud.tasks = hud.tasks; e.hud.tasksStamp = hud.tasksStamp; e.hud.tasksNote = hud.tasksNote }
         } catch (ex: Exception) { }
     }
 
@@ -1308,6 +1337,11 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
             else -> sb.append("本日の予定は${ev.size}件、最初は${f.format(java.util.Date(ev[0].first))}から${ev[0].second}です。")
         }
         if (recentNotifs.isNotEmpty()) sb.append("未確認の通知が${recentNotifs.size}件あります。")
+        val openTasks = hud.tasks.filter { !it.done }
+        if (openTasks.isNotEmpty()) {
+            val urgent = openTasks.count { it.tier == 1 }
+            sb.append("対応事項は${openTasks.size}件" + (if (urgent > 0) "、うち急ぎが${urgent}件" else "") + "です。")
+        }
         if (s.battery in 1..40 && !s.charging) sb.append("なお、電池が${s.battery}%ですので、お出かけ前に充電をおすすめします。")
         sb.append("良い一日を。")
         announce(sb.toString())
@@ -1368,8 +1402,10 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
                 "声のサービス：${if (useEleven()) "ElevenLabs" else "スマホ"}",
                 "顔認識：${if (prefs.getBoolean("faceOn", true)) "ON" else "OFF"}", "${aiName()}が覚えていること", "スキャンモード",
                 "手のジェスチャー：${arrayOf("充電中・ワークショップ時", "常に", "OFF")[prefs.getInt("gestureMode", 0)]}", "外部ディスプレイ表示：${if (prefs.getBoolean("extOn", true)) "ON" else "OFF"}", "パネルの並びを元に戻す", "通知の演出をテスト", "¥ PAY の決済アプリ", "よく使うアプリをスマホ全体の使用時間で判定",
-                "PiP互換モード：${if (pipSafe()) "ON" else "OFF"}", "音楽リングを実際の音に連動：${if (prefs.getBoolean("realSpectrum", false)) "ON" else "OFF"}")) { _, w ->
+                "PiP互換モード：${if (pipSafe()) "ON" else "OFF"}", "音楽リングを実際の音に連動：${if (prefs.getBoolean("realSpectrum", false)) "ON" else "OFF"}",
+                "タスク（追加・同期・合言葉）")) { _, w ->
                 when (w) {
+                    26 -> tasksMenu()
                     0 -> askApiKey(); 1 -> askName(); 2 -> if (useEleven()) pickElevenVoice() else pickVoice(); 3 -> tuneVoice()
                     4 -> AlertDialog.Builder(this).setTitle("声の加工")
                         .setSingleChoiceItems(arrayOf("ナチュラル（加工なし）", "AIボイス（低音＋金属的な響き＋残響）", "AIボイス・強め"), voiceStyle()) { d, which ->
@@ -1824,6 +1860,7 @@ ${if (drive.isShowing) "現在${callName()}は運転中です。返答はとく�
 再生中：$media
 最近の通知：
 $notifs
+タスク（未完了）：${hud.tasks.filter { !it.done }.take(12).joinToString("／") { (when (it.tier) { 1 -> "［急ぎ］"; 2 -> "［今日］"; 3 -> "［今週］"; 4 -> "［来週］"; else -> "" }) + it.text }.ifEmpty { "なし" }}
 インストール済みアプリ：$appNames
 【あなたが覚えていること】
 ${memories().ifEmpty { listOf("（まだなし）") }.joinToString("\n") { "・$it" }}
@@ -1962,6 +1999,15 @@ ${memories().ifEmpty { listOf("（まだなし）") }.joinToString("\n") { "・$
                 val before = memories(); val after = before.filterNot { it.contains(k) }
                 saveMemories(after); if (after.size == before.size) "該当する記憶はありません" else "${before.size - after.size}件忘れました"
             }
+            "add_task" -> {
+                val t = input.optString("text").trim()
+                if (t.isEmpty()) "タスクの内容が空です" else { TaskStore.addLocal(this, t); ui { refreshTasks() }; "タスクに追加しました：$t" }
+            }
+            "complete_task" -> {
+                val done = TaskStore.completeMatching(this, input.optString("keyword"))
+                ui { refreshTasks() }
+                if (done == null) "該当する未完了のタスクはありません" else "完了にしました：$done"
+            }
             "open_notification" -> {
                 val n = recentNotifs.toList().getOrNull(input.optInt("index") - 1) ?: return "その番号の通知はありません"
                 ui { handler.postDelayed({ assistant.close(); onAlertOpen(n, null) }, 1400) }
@@ -2070,12 +2116,18 @@ ${memories().ifEmpty { listOf("（まだなし）") }.joinToString("\n") { "・$
         })
         box.addView(header)
         box.addView(TextView(this).apply {
-            text = "タップで起動 ／ 長押しでリングに登録・解除"
+            text = "タップで起動 ／ 長押しでリングに登録・解除 ／ 右端の索引をなぞるとジャンプ"
             setTextColor(Color.argb(160, 0, 229, 255)); textSize = 12f
             setPadding(0, dp(2), 0, dp(10))
         })
         search = EditText(this).apply {
-            hint = "SEARCH"; setHintTextColor(Color.argb(110, 0, 229, 255))
+            hint = "SEARCH ― かな・カナ・ローマ字どれでも"; setHintTextColor(Color.argb(110, 0, 229, 255))
+            imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_GO
+            // 決定キーで、いちばん上の候補を起動
+            setOnEditorActionListener { v, _, _ ->
+                val top = filtered.firstOrNull()
+                if (top != null && text.toString().isNotBlank()) { SoundFx.play(SoundFx.Fx.OPEN); launch(top); closeDrawer(); true } else false
+            }
             setTextColor(CYAN); textSize = 16f; isSingleLine = true
             background = frameBg(80)
             setPadding(dp(14), dp(10), dp(14), dp(10))
@@ -2085,13 +2137,25 @@ ${memories().ifEmpty { listOf("（まだなし）") }.joinToString("\n") { "・$
                 override fun afterTextChanged(s: Editable?) = applyFilter()
             })
         }
-        box.addView(search, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(12) })
+        box.addView(search, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(8) })
+        // 種類で絞り込むタブ
+        chipRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        AppText.CATS.forEachIndexed { idx, name ->
+            chipRow.addView(TextView(this).apply {
+                text = name; textSize = 13f; setPadding(dp(14), dp(7), dp(14), dp(7))
+                typeface = Typeface.create("sans-serif-condensed", Typeface.BOLD)
+                setOnClickListener { SoundFx.play(SoundFx.Fx.TAP); catSel = idx; styleChips(); applyFilter(); grid.setSelection(0) }
+            }, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(6) })
+        }
+        styleChips()
+        box.addView(HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false; addView(chipRow) }, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(10) })
         // よく使うアプリ（横並び・大きめ）
         freqBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        freqBox.addView(TextView(this).apply {
-            text = "◆ FREQUENTLY USED"; setTextColor(CYAN); textSize = 13f; letterSpacing = 0.3f
+        freqTitle = TextView(this).apply {
+            text = "◆ RECENT  ｜  FREQUENTLY USED"; setTextColor(CYAN); textSize = 13f; letterSpacing = 0.2f
             typeface = Typeface.create("sans-serif-condensed", Typeface.BOLD); setPadding(dp(2), 0, 0, dp(6))
-        })
+        }
+        freqBox.addView(freqTitle)
         freqRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         freqBox.addView(HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false; addView(freqRow) })
         freqBox.addView(View(this).apply { setBackgroundColor(Color.argb(90, 120, 222, 255)) }, LinearLayout.LayoutParams(-1, dp(1)).apply { topMargin = dp(10); bottomMargin = dp(10) })
@@ -2145,7 +2209,16 @@ ${memories().ifEmpty { listOf("（まだなし）") }.joinToString("\n") { "・$
                 toggleDock(filtered[p]); (adapter as BaseAdapter).notifyDataSetChanged(); true
             }
         }
-        box.addView(grid, LinearLayout.LayoutParams(-1, 0, 1f))
+        indexBar = IndexBar(this).apply {
+            onPick = { g ->
+                val pos = filtered.indexOfFirst { appGroup[it.key] == g }
+                if (pos >= 0) grid.setSelection(pos)
+            }
+        }
+        val listRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        listRow.addView(grid, LinearLayout.LayoutParams(0, -1, 1f))
+        listRow.addView(indexBar, LinearLayout.LayoutParams(dp(30), -1).apply { leftMargin = dp(4) })
+        box.addView(listRow, LinearLayout.LayoutParams(-1, 0, 1f))
         return box
     }
 
@@ -2186,27 +2259,70 @@ ${memories().ifEmpty { listOf("（まだなし）") }.joinToString("\n") { "・$
     /** よく使う度合い：このホームから開いた回数 ＋ 使用時間（5分＝1回分） */
     private fun freqScore(app: AppEntry, u: Map<String, Long>): Float = countOf(app) + (u[app.pkg] ?: 0L) / 300_000f
 
+    private fun styleChips() {
+        if (!::chipRow.isInitialized) return
+        for (k in 0 until chipRow.childCount) {
+            val tv = chipRow.getChildAt(k) as TextView
+            val on = k == catSel
+            tv.setTextColor(if (on) Color.rgb(1, 10, 20) else CYAN)
+            tv.background = GradientDrawable().apply {
+                cornerRadius = dp(4).toFloat()
+                setColor(if (on) Color.argb(235, 120, 222, 255) else Color.argb(50, 0, 40, 60))
+                setStroke(dp(1), Color.argb(if (on) 255 else 110, 0, 229, 255))
+            }
+        }
+    }
+
+    private fun lastUsed(app: AppEntry) = prefs.getLong("last:" + app.key, 0L)
+
     private fun applyFilter() {
         if (!::grid.isInitialized) return
-        val q = search.text.toString().trim().lowercase()
+        val qn = AppText.norm(search.text.toString().trim())
         frequentCount = 0
-        if (q.isEmpty()) {
-            val u = usage()
-            val freq = apps.filter { it.pkg != packageName }.map { it to freqScore(it, u) }.filter { it.second > 0f }
-                .sortedByDescending { it.second }.map { it.first }.distinctBy { it.pkg }.take(8)
-            buildFreqRow(freq)
-            freqBox.visibility = if (freq.isEmpty()) View.GONE else View.VISIBLE
-            filtered = apps
+        if (qn.isEmpty()) {
+            if (catSel == 0) {
+                val u = usage()
+                val recent = apps.filter { lastUsed(it) > 0L }.sortedByDescending { lastUsed(it) }.distinctBy { it.pkg }.take(4)
+                val freq = apps.filter { a -> recent.none { it.pkg == a.pkg } }.map { it to freqScore(it, u) }.filter { it.second > 0f }
+                    .sortedByDescending { it.second }.map { it.first }.distinctBy { it.pkg }.take(8)
+                buildFreqRow(recent, freq)
+                freqBox.visibility = if (recent.isEmpty() && freq.isEmpty()) View.GONE else View.VISIBLE
+                filtered = apps
+            } else {
+                freqBox.visibility = View.GONE
+                filtered = apps.filter { appCat[it.key] == catSel }
+            }
         } else {
+            // 検索は種類タブに関係なく全アプリから。かな・カナ・ローマ字のどれで打っても当たる
             freqBox.visibility = View.GONE
-            filtered = apps.filter { it.label.lowercase().contains(q) || it.pkg.lowercase().contains(q) }
+            val variants = listOfNotNull(qn, AppText.romajiToHira(qn)).distinct()
+            filtered = apps.mapNotNull { a ->
+                val text = appText[a.key] ?: AppText.norm(a.label)
+                val name = text.substringBefore(' ')
+                val rank = when {
+                    variants.any { name.startsWith(it) } -> 0
+                    variants.any { name.contains(it) } -> 1
+                    variants.any { text.contains(it) } -> 2
+                    else -> -1
+                }
+                if (rank < 0) null else a to rank
+            }.sortedBy { it.second }.map { it.first }
         }
+        // 索引は、絞り込んでいない長い一覧のときだけ
+        val showIndex = qn.isEmpty() && filtered.size >= 20
+        indexBar.visibility = if (showIndex) View.VISIBLE else View.GONE
+        if (showIndex) { val present = filtered.mapNotNull { appGroup[it.key] }.toSet(); indexBar.entries = AppText.GROUPS.filter { it in present } }
         (grid.adapter as BaseAdapter).notifyDataSetChanged()
     }
 
-    private fun buildFreqRow(list: List<AppEntry>) {
+    private fun buildFreqRow(recent: List<AppEntry>, freq: List<AppEntry>) {
         freqRow.removeAllViews()
-        for (app in list) {
+        freqTitle.text = when { recent.isEmpty() -> "◆ FREQUENTLY USED"; freq.isEmpty() -> "◆ RECENT"; else -> "◆ RECENT  ｜  FREQUENTLY USED" }
+        for ((idx, app) in (recent + freq).withIndex()) {
+            if (idx == recent.size && recent.isNotEmpty() && freq.isNotEmpty()) {
+                freqRow.addView(View(this).apply { setBackgroundColor(Color.argb(120, 120, 222, 255)) },
+                    LinearLayout.LayoutParams(dp(1), dp(64)).apply { leftMargin = dp(6); rightMargin = dp(6); topMargin = dp(8) })
+            }
             val cell = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL
                 setPadding(dp(6), dp(4), dp(6), dp(4))
@@ -2243,6 +2359,7 @@ ${memories().ifEmpty { listOf("（まだなし）") }.joinToString("\n") { "・$
 
     private fun closeDrawer() {
         if (drawer.visibility != View.VISIBLE) return
+        if (catSel != 0) { catSel = 0; styleChips() }
         search.setText("")
         (getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager).hideSoftInputFromWindow(search.windowToken, 0)
         drawer.visibility = View.GONE
@@ -2414,6 +2531,66 @@ ${memories().ifEmpty { listOf("（まだなし）") }.joinToString("\n") { "・$
         in 95..99 -> "雷雨"; else -> "---"
     }
 
+    // ---------- tasks (Claudeの定期タスクのまとめ＋自分で足したタスク) ----------
+    private var lastTaskSyncTry = 0L
+    private var taskSyncing = false
+
+    private fun refreshTasks() {
+        hud.tasks = TaskStore.all(this)
+        hud.tasksStamp = TaskStore.stamp(this)
+        hud.tasksNote = if (TaskStore.key(this).isEmpty()) "同期の合言葉が未設定です" else "タスクはありません"
+    }
+
+    private fun syncTasks(manual: Boolean) {
+        if (taskSyncing) return
+        taskSyncing = true; lastTaskSyncTry = System.currentTimeMillis()
+        thread {
+            var msg: String? = null; var changed = false
+            try { changed = TaskStore.sync(this) } catch (e: TaskStore.SyncError) { msg = e.message } catch (e: Exception) { msg = "同期できませんでした" }
+            runOnUiThread {
+                taskSyncing = false
+                refreshTasks()
+                if (changed) {
+                    hud.tasksPulse(); SoundFx.play(SoundFx.Fx.SYNC, haptic = false)
+                    val open = hud.tasks.count { !it.done }
+                    if (!manual && canSpeakProactive() && prefs.getBoolean("voice", true) && open > 0) announce("新しいまとめが届きました。対応事項は${open}件です。")
+                }
+                if (manual) toast(msg ?: if (changed) "新しいまとめを受け取りました" else "最新の状態です")
+            }
+        }
+    }
+
+    override fun onTaskToggle(id: String) { TaskStore.toggle(this, id); refreshTasks() }
+
+    private fun askNewTask() {
+        val et = EditText(this).apply { hint = "やること"; setSingleLine() }
+        AlertDialog.Builder(this).setTitle("タスクを追加").setView(et)
+            .setPositiveButton("追加") { _, _ -> TaskStore.addLocal(this, et.text.toString()); refreshTasks() }
+            .setNegativeButton("やめる", null).show()
+    }
+
+    private fun askTaskKey() {
+        val et = EditText(this).apply { setText(TaskStore.key(this@MainActivity)); hint = "Claudeから受け取った合言葉を貼り付け"; setSingleLine() }
+        AlertDialog.Builder(this).setTitle("同期の合言葉")
+            .setMessage("Claudeの定期タスク（朝のまとめ・週のまとめ）を受け取るための合言葉です。Claudeとの会話に表示されたものを、そのまま貼り付けてください。")
+            .setView(et)
+            .setPositiveButton("保存して同期") { _, _ -> TaskStore.setKey(this, et.text.toString()); refreshTasks(); if (TaskStore.key(this).isNotEmpty()) syncTasks(manual = true) }
+            .setNegativeButton("やめる", null).show()
+    }
+
+    private fun tasksMenu() {
+        val last = TaskStore.syncAge(this)
+        AlertDialog.Builder(this).setTitle("TASKS")
+            .setItems(arrayOf("タスクを追加", "今すぐ同期" + (if (last.isNotEmpty()) "（最終：$last）" else ""), "完了した自分のタスクを消す", "同期の合言葉を設定")) { _, w ->
+                when (w) {
+                    0 -> askNewTask()
+                    1 -> if (TaskStore.key(this).isEmpty()) askTaskKey() else { toast("同期中…"); syncTasks(manual = true) }
+                    2 -> { val n = TaskStore.clearDone(this); refreshTasks(); toast(if (n > 0) "${n}件消しました" else "消すタスクはありません") }
+                    3 -> askTaskKey()
+                }
+            }.show()
+    }
+
     // ---------- HUD callbacks ----------
     override fun onOpenDrawer() = openDrawer()
     override fun onLaunch(app: AppEntry, src: android.graphics.Rect?) = launch(app, src, delayMs = 320)
@@ -2422,6 +2599,7 @@ ${memories().ifEmpty { listOf("（まだなし）") }.joinToString("\n") { "・$
     override fun onHomeSettings() = safeStart(Intent(Settings.ACTION_HOME_SETTINGS))
     override fun onPanelTap(panel: String) {
         when (panel) {
+            "TASKS" -> tasksMenu()
             "POWER" -> safeStart(Intent(Intent.ACTION_POWER_USAGE_SUMMARY))
             "WEATHER", "FORECAST" -> { lastWeather = 0; fetchWeather(); toast("天気を更新中…") }
             "SYSTEM" -> safeStart(Intent(Settings.ACTION_INTERNAL_STORAGE_SETTINGS))

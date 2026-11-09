@@ -15,7 +15,7 @@ import kotlin.math.sin
 
 /** 合成した小さな電子音と振動 */
 object SoundFx {
-    enum class Fx { TAP, OPEN, BACK, ALERT, LISTEN, DONE, ERROR }
+    enum class Fx { TAP, OPEN, BACK, ALERT, LISTEN, DONE, ERROR, ALERT_MAIL, ALERT_URGENT, ALERT_SOFT, SYNC }
 
     private const val RATE = 22050
     private val cache = HashMap<Fx, ShortArray>()
@@ -31,6 +31,11 @@ object SoundFx {
         cache[Fx.ALERT] = concat(tone(1320f, 0.07f, 0.28f), silence(0.04f), tone(1760f, 0.09f, 0.28f), silence(0.04f), tone(2350f, 0.12f, 0.24f))
         cache[Fx.LISTEN] = chirp(700f, 1900f, 0.13f, 0.28f)
         cache[Fx.DONE] = chirp(1900f, 900f, 0.11f, 0.24f)
+        // 種類ごとの着信音：メールは柔らかい2音、緊急は速い警報、予定などは下から上がる和音、同期は短い上昇
+        cache[Fx.ALERT_MAIL] = concat(tone(988f, 0.11f, 0.24f), silence(0.03f), tone(1480f, 0.16f, 0.22f))
+        cache[Fx.ALERT_URGENT] = concat(tone(1760f, 0.06f, 0.3f), silence(0.03f), tone(1760f, 0.06f, 0.3f), silence(0.03f), tone(1760f, 0.06f, 0.3f), silence(0.05f), chirp(1760f, 2640f, 0.14f, 0.28f))
+        cache[Fx.ALERT_SOFT] = concat(chirp(660f, 990f, 0.09f, 0.22f), chirp(990f, 1320f, 0.09f, 0.22f), tone(1980f, 0.12f, 0.2f))
+        cache[Fx.SYNC] = concat(chirp(1200f, 2400f, 0.06f, 0.2f), silence(0.02f), chirp(1600f, 3200f, 0.08f, 0.18f))
         cache[Fx.ERROR] = concat(tone(420f, 0.09f, 0.3f), silence(0.03f), tone(330f, 0.12f, 0.3f))
     }
 
@@ -66,6 +71,10 @@ object SoundFx {
                 Fx.TAP, Fx.BACK -> VibrationEffect.createPredefined(VibrationEffect.EFFECT_TICK)
                 Fx.OPEN, Fx.DONE, Fx.LISTEN -> VibrationEffect.createPredefined(VibrationEffect.EFFECT_CLICK)
                 Fx.ALERT -> VibrationEffect.createWaveform(longArrayOf(0, 30, 60, 30, 60, 50), -1)
+                Fx.ALERT_MAIL -> VibrationEffect.createWaveform(longArrayOf(0, 40, 90, 60), -1)
+                Fx.ALERT_URGENT -> VibrationEffect.createWaveform(longArrayOf(0, 60, 50, 60, 50, 60, 50, 120), -1)
+                Fx.ALERT_SOFT -> VibrationEffect.createWaveform(longArrayOf(0, 25, 70, 25), -1)
+                Fx.SYNC -> VibrationEffect.createPredefined(VibrationEffect.EFFECT_TICK)
                 Fx.ERROR -> VibrationEffect.createPredefined(VibrationEffect.EFFECT_DOUBLE_CLICK)
             }
             v.vibrate(eff)
