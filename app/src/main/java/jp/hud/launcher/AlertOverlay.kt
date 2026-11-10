@@ -13,6 +13,8 @@ import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.min
 import kotlin.math.sin
+import kotlin.math.atan2
+import kotlin.math.hypot
 import kotlin.random.Random
 
 /** 通知の種類。種類ごとに色・見出し・効果音が変わる */
@@ -93,6 +95,8 @@ class AlertOverlay(context: Context) : View(context) {
     private val ellip = TextPaint(Paint.ANTI_ALIAS_FLAG)
     private val SCRAMBLE = "アイウエオカキクケコサシスセソ0123456789#%&<>/=+"
 
+    private val INTROS = 8
+
     init { visibility = GONE }
 
     val isShowing get() = item != null
@@ -108,7 +112,7 @@ class AlertOverlay(context: Context) : View(context) {
         item = n; queued = waiting
         if (!same) {
             shownAt = System.currentTimeMillis()
-            variant = seq++ % 4
+            variant = seq++ % INTROS
             icon = try { context.packageManager.getApplicationIcon(n.pkg) } catch (e: Exception) { null }
         }
         setKind(NotifKind.of(n))
@@ -201,7 +205,7 @@ class AlertOverlay(context: Context) : View(context) {
                 mono.textAlign = Paint.Align.RIGHT
                 c.drawText(String.format("RENDER %3d%%", (e * 100).toInt()), zx - sz * 0.85f, zy + sz * 0.5f, mono)
             }
-            else -> { // レーダー：回る光が発信元を捉える
+            3 -> { // レーダー：回る光が発信元を捉える
                 val rr = sz * 1.25f
                 stroke.strokeWidth = 1.5f; stroke.color = acc(110)
                 for (k in 1..3) c.drawCircle(zx, zy, rr * k / 3f, stroke)
@@ -218,6 +222,112 @@ class AlertOverlay(context: Context) : View(context) {
                 }
                 mono.textAlign = Paint.Align.CENTER; mono.textSize = u0 / 46f; mono.color = acc(200)
                 c.drawText("SIGNAL SOURCE ACQUIRED", zx, zy - rr - mono.textSize, mono)
+            }
+            4 -> { // グリッチ：横に裂けた映像が、ずれながら揃っていく
+                val e = ease(p * 1.3f)
+                val slices = 14
+                val rnd = Random((p * 40).toInt())
+                val top = zy - sz / 2
+                for (k in 0 until slices) {
+                    val y0 = top + sz * k / slices; val y1 = top + sz * (k + 1) / slices
+                    val off = (rnd.nextFloat() - 0.5f) * sz * 0.9f * (1f - e)
+                    c.save(); c.clipRect(zx - sz, y0, zx + sz, y1)
+                    // 赤と青にずれた残像
+                    c.saveLayerAlpha(null, (110 * (1f - e)).toInt()); c.translate(off - sz * 0.06f, 0f); drawIcon(c, zx, zy, sz); c.restore()
+                    c.translate(off, 0f); drawIcon(c, zx, zy, sz)
+                    c.restore()
+                }
+                for (k in 0 until 5) {
+                    val y = top + rnd.nextFloat() * sz
+                    fill.color = if (k % 2 == 0) Color.argb((160 * (1f - e)).toInt(), 255, 60, 90) else acc((180 * (1f - e)).toInt())
+                    c.drawRect(zx - sz * (0.6f + rnd.nextFloat()), y, zx + sz * (0.6f + rnd.nextFloat()), y + 2f + rnd.nextFloat() * 6f, fill)
+                }
+                tmp.set(zx - sz * 0.7f, zy - sz * 0.7f, zx + sz * 0.7f, zy + sz * 0.7f)
+                brackets(c, tmp, 0f, sz * 0.22f, 4f, acc((255 * e).toInt()))
+                mono.textAlign = Paint.Align.CENTER; mono.textSize = u0 / 44f
+                mono.color = if (e < 0.9f) Color.argb(220, 255, 90, 110) else ACC
+                c.drawText(if (e < 0.9f) "SIGNAL CORRUPTED… RECOVERING" else "SIGNAL RESTORED", zx, zy - sz * 0.95f, mono)
+            }
+            5 -> { // ワープ：光の線が中心へ吸い込まれ、閃光とともに現れる
+                val rnd = Random(77)
+                val reach = hypot(W, H) * 0.6f
+                for (k in 0 until 60) {
+                    val ang = rnd.nextFloat() * 2 * PI.toFloat()
+                    val sp = 0.6f + rnd.nextFloat() * 0.8f
+                    val q = ((p * 1.4f * sp) + rnd.nextFloat() * 0.3f) % 1f
+                    val d1 = reach * (1f - q); val d0 = d1 + reach * 0.12f * (0.3f + q)
+                    stroke.strokeWidth = 1.5f + q * 2.5f; stroke.color = acc((60 + 190 * q).toInt())
+                    c.drawLine(zx + cos(ang) * d0, zy + sin(ang) * d0, zx + cos(ang) * d1, zy + sin(ang) * d1, stroke)
+                }
+                if (p > 0.55f) {
+                    val q = (p - 0.55f) / 0.45f
+                    fill.color = Color.argb((230 * (1f - q)).toInt(), 255, 255, 255); c.drawCircle(zx, zy, sz * (0.2f + q * 1.6f), fill)
+                    c.saveLayerAlpha(null, (255 * min(1f, q * 2)).toInt())
+                    c.save(); c.scale(0.6f + 0.4f * ease(q), 0.6f + 0.4f * ease(q), zx, zy); drawIcon(c, zx, zy, sz); c.restore()
+                    c.restore()
+                }
+                mono.textAlign = Paint.Align.CENTER; mono.textSize = u0 / 46f; mono.color = acc(210)
+                c.drawText(String.format("INBOUND  %04d m/s", (9999 * (1f - p)).toInt()), zx, zy - sz * 1.0f, mono)
+            }
+            6 -> { // ハニカム：六角形のタイルが外から集まって組み上がる
+                val e = ease(p * 1.25f)
+                val hexR = sz * 0.2f
+                val dxh = hexR * 1.732f
+                for (row in -3..3) for (colI in -3..3) {
+                    val hx = zx + colI * dxh + (if (row % 2 != 0) dxh / 2 else 0f)
+                    val hy = zy + row * hexR * 1.5f
+                    val dist = hypot(hx - zx, hy - zy)
+                    if (dist > sz * 0.95f) continue
+                    val delay = dist / (sz * 0.95f) * 0.5f
+                    val q = ((e - delay) / 0.5f).coerceIn(0f, 1f)
+                    if (q <= 0f) continue
+                    val fly = (1f - ease(q)) * sz * 1.4f
+                    val ang = atan2(hy - zy, hx - zx)
+                    val px = hx + cos(ang) * fly; val py = hy + sin(ang) * fly
+                    val hp = Path()
+                    for (v in 0..6) {
+                        val a = Math.toRadians((30 + v * 60).toDouble())
+                        val x = px + hexR * 0.92f * cos(a).toFloat(); val y = py + hexR * 0.92f * sin(a).toFloat()
+                        if (v == 0) hp.moveTo(x, y) else hp.lineTo(x, y)
+                    }
+                    hp.close()
+                    fill.color = acc((40 * q).toInt()); c.drawPath(hp, fill)
+                    stroke.strokeWidth = 2f; stroke.color = acc((220 * q).toInt()); c.drawPath(hp, stroke)
+                }
+                if (e > 0.7f) {
+                    val q = (e - 0.7f) / 0.3f
+                    c.saveLayerAlpha(null, (255 * q).toInt()); drawIcon(c, zx, zy, sz * 0.75f); c.restore()
+                }
+                mono.textAlign = Paint.Align.CENTER; mono.textSize = u0 / 46f; mono.color = acc(210)
+                c.drawText(String.format("ASSEMBLING  %3d%%", (e * 100).toInt()), zx, zy - sz * 1.05f, mono)
+            }
+            else -> { // ホログラム投影：下から光の円錐が伸びて、映像が浮かび上がる
+                val e = ease(p * 1.3f)
+                val baseY = H * 0.86f
+                val topY = zy - sz * 0.6f
+                val beamTop = baseY + (topY - baseY) * e
+                fill.shader = LinearGradient(0f, baseY, 0f, beamTop, acc(150), acc(10), Shader.TileMode.CLAMP)
+                val cone = Path().apply {
+                    moveTo(zx - sz * 0.08f, baseY); lineTo(zx - sz * 0.75f, beamTop); lineTo(zx + sz * 0.75f, beamTop); lineTo(zx + sz * 0.08f, baseY); close()
+                }
+                c.drawPath(cone, fill); fill.shader = null
+                // 投影機
+                tmp.set(zx - sz * 0.5f, baseY - sz * 0.06f, zx + sz * 0.5f, baseY + sz * 0.06f)
+                glow.strokeWidth = 10f; glow.color = acc(200); c.drawOval(tmp, glow)
+                stroke.strokeWidth = 2.5f; stroke.color = ACC; c.drawOval(tmp, stroke)
+                if (e > 0.5f) {
+                    val q = (e - 0.5f) / 0.5f
+                    val flick = if ((p * 60).toInt() % 7 == 0) 0.5f else 1f
+                    c.saveLayerAlpha(null, (230 * q * flick).toInt()); drawIcon(c, zx, zy, sz); c.restore()
+                    // ホログラムの走査線
+                    c.save(); c.clipRect(zx - sz / 2, zy - sz / 2, zx + sz / 2, zy + sz / 2)
+                    var y = zy - sz / 2 + ((p * 300) % 6f)
+                    stroke.strokeWidth = 1f; stroke.color = acc((90 * q).toInt())
+                    while (y < zy + sz / 2) { c.drawLine(zx - sz / 2, y, zx + sz / 2, y, stroke); y += 6f }
+                    c.restore()
+                }
+                mono.textAlign = Paint.Align.CENTER; mono.textSize = u0 / 46f; mono.color = acc(210)
+                c.drawText("HOLOGRAPHIC PROJECTION", zx, zy - sz * 1.0f, mono)
             }
         }
         label.textAlign = Paint.Align.CENTER; label.textSize = u0 / 30f * 1.1f; label.letterSpacing = 0.3f; label.color = ACC

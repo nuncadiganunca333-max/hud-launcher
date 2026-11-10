@@ -23,7 +23,9 @@ class AssistantOverlay(context: Context) : View(context) {
     var listener: Listener? = null
     var title = "JARVIS"
     var state = State.IDLE
-        set(v) { field = v; invalidate() }
+        set(v) { field = v; invalidate(); onState?.invoke(v) }
+    /** 状態が変わったときに呼ばれる（ホームのコアの鼓動に使う） */
+    var onState: ((State) -> Unit)? = null
     var level = 0f          // mic level 0..1
     var heard = ""
         set(v) { field = v; invalidate() }

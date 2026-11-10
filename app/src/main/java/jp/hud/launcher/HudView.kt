@@ -53,6 +53,11 @@ data class MediaInfo(
 
 class HudView(context: Context) : View(context), SensorEventListener {
 
+    companion object {
+        /** ジャービスのデザインの名前（設定のメニューに出る順） */
+        val CORE_STYLES = arrayOf("ヘキサ（標準）", "オーブ", "ダイヤモンド", "オクタ", "パルサー")
+    }
+
     interface Listener {
         fun onOpenDrawer()
         fun onLaunch(app: AppEntry, src: Rect?)
@@ -120,6 +125,12 @@ class HudView(context: Context) : View(context), SensorEventListener {
     // ---- external inputs for effects ----
     var geoLat = 35.02; var geoLon = 138.48
     var speaking = false          // assistant voice output
+    var listening = false         // 声を聞き取っている間
+        set(v) { field = v; wake(); invalidate() }
+    /** ジャービス（中央のコア）のデザイン。CORE_STYLES の番号 */
+    var coreStyle = context.getSharedPreferences("hud", Context.MODE_PRIVATE).getInt("coreStyle", 0)
+        set(v) { field = v; invalidate() }
+    private var beatEnv = 0f
     var voiceLevel = 0f           // mic level while listening
     var spectrum: FloatArray? = null  // music FFT bands 0..1
     var idleTimeoutMs = 45000L
@@ -1683,33 +1694,46 @@ class HudView(context: Context) : View(context), SensorEventListener {
         }
 
         c.restore()
-        // layered hexagon core (near layer, with shadow)
-        val hr = coreR * 0.5f
+        // ===== ジャービス本体（デザインは coreStyle で切り替え） =====
+        // 話している・聞き取っている間は、心臓のように「ドクン、ドクン」と脈打つ
+        beatEnv += ((if (speaking || listening) 1f else 0f) - beatEnv) * 0.08f
+        val bpm = if (speaking) 84f else 70f
+        val bph = (t * bpm / 60f) % 1f
+        fun bump(x: Float, c0: Float, w: Float) = exp(-((x - c0) / w).let { it * it })
+        val beat = (bump(bph, 0.05f, 0.035f) + 0.65f * bump(bph, 0.24f, 0.035f)) * beatEnv
+        val hr = coreR * 0.5f * (1f + 0.085f * beat)
+        val rot = t * 6f
         c.save(); c.translate(dX * 0.35f + unit * 0.2f, dY * 0.35f + unit * 0.5f)
         fill.color = Color.argb(110, 0, 0, 0)
-        c.drawPath(hexPath(hr * 1.04f, t * 6f), fill)
+        c.drawPath(corePath(hr * 1.04f, rot), fill)
         c.restore()
         c.save(); c.translate(-dX * 0.2f, -dY * 0.2f)
-        fill.color = Color.WHITE; fill.shader = RadialGradient(cx, cy, hr, intArrayOf(cyan(80), cyan(20), cyan(0)), floatArrayOf(0f, 0.7f, 1f), Shader.TileMode.CLAMP)
-        c.drawPath(hexPath(hr, t * 6f), fill); fill.shader = null
-        val pulse = (sin(t * 2.2f) + 1) / 2
-        glow.strokeWidth = 16f; glow.color = cyan((90 + 100 * pulse).toInt()); c.drawPath(hexPath(hr, t * 6f), glow)
-        stroke.strokeWidth = 2.5f; stroke.color = Color.argb(255, 210, 245, 255); c.drawPath(hexPath(hr, t * 6f), stroke)
-        stroke.strokeWidth = 1.5f; stroke.color = cyan(130); c.drawPath(hexPath(hr * 0.88f, -t * 10f), stroke)
-        stroke.strokeWidth = 1f; stroke.color = cyan(70); c.drawPath(hexPath(hr * 0.76f, t * 15f), stroke)
-        // hex vertices nodes
-        for (k in 0 until 6) {
-            val a = Math.toRadians((t * 6f + 30 + k * 60).toDouble())
-            fill.color = cyan(230)
-            c.drawCircle(cx + hr * cos(a).toFloat(), cy + hr * sin(a).toFloat(), unit * 0.1f, fill)
+        // 鼓動の衝撃波（ドクンとドクンで2つ）
+        if (beatEnv > 0.02f) {
+            for ((k, c0) in floatArrayOf(0.05f, 0.24f).withIndex()) {
+                val q = ((bph - c0 + 1f) % 1f) / 0.6f
+                if (q >= 1f) continue
+                val rr = coreR * 0.5f * (1f + q * (1.1f + k * 0.25f))
+                glow.strokeWidth = 20f * (1f - q); glow.color = cyan((230 * (1f - q) * beatEnv).toInt()); c.drawPath(corePath(rr, rot), glow)
+                stroke.strokeWidth = 2f; stroke.color = cyan((200 * (1f - q) * beatEnv).toInt()); c.drawPath(corePath(rr, rot), stroke)
+            }
+            drawHeartLine(c, t, bpm, beatEnv)
         }
+        fill.color = Color.WHITE; fill.shader = RadialGradient(cx, cy, hr, intArrayOf(cyan((80 + 120 * beat).toInt().coerceAtMost(255)), cyan(20), cyan(0)), floatArrayOf(0f, 0.7f, 1f), Shader.TileMode.CLAMP)
+        c.drawPath(corePath(hr, rot), fill); fill.shader = null
+        val pulse = (sin(t * 2.2f) + 1) / 2
+        glow.strokeWidth = 16f + 14f * beat; glow.color = cyan((90 + 100 * pulse + 60 * beat).toInt().coerceAtMost(255)); c.drawPath(corePath(hr, rot), glow)
+        stroke.strokeWidth = 2.5f; stroke.color = Color.argb(255, 210, 245, 255); c.drawPath(corePath(hr, rot), stroke)
+        stroke.strokeWidth = 1.5f; stroke.color = cyan(130); c.drawPath(corePath(hr * 0.88f, -t * 10f), stroke)
+        stroke.strokeWidth = 1f; stroke.color = cyan(70); c.drawPath(corePath(hr * 0.76f, t * 15f), stroke)
+        drawCoreExtras(c, hr, t, beat)
 
         if (gl?.ready != true) { drawGlobe(c, hr * 0.8f, t); drawSatellites(c, hr * 0.8f, t) }
         // ③ voice pulse
         if (speakEnv > 0.02f) {
             for (k in 0 until 3) {
                 val q = speakEnv * (1f - k * 0.25f)
-                glow.strokeWidth = 18f; glow.color = cyan((200 * q).toInt()); c.drawPath(hexPath(hr * (1f + 0.12f * q + k * 0.08f), t * 6f), glow)
+                glow.strokeWidth = 18f; glow.color = cyan((200 * q).toInt()); c.drawPath(corePath(hr * (1f + 0.12f * q + k * 0.08f), rot), glow)
             }
             fill.color = Color.WHITE
             fill.shader = RadialGradient(cx, cy, hr, intArrayOf(cyan((120 * speakEnv).toInt()), cyan(0)), null, Shader.TileMode.CLAMP)
@@ -1731,6 +1755,110 @@ class HudView(context: Context) : View(context), SensorEventListener {
         c.drawText(talkHint, cx, cy + big * 1.38f, label)
         c.restore()
         label.letterSpacing = 0f; label.color = CYAN; mono.color = CYAN
+    }
+
+    /** コアの外形。デザインごとに形が変わる */
+    private fun corePath(r: Float, rotDeg: Float): Path = when (coreStyle) {
+        1 -> Path().apply { addCircle(cx, cy, r, Path.Direction.CW) }
+        2 -> polyPath(4, r, rotDeg + 15f)
+        3 -> polyPath(8, r, rotDeg - 7.5f)
+        4 -> Path().apply {
+            for (k in 0..24) {
+                val a = Math.toRadians((rotDeg + k * 15f).toDouble())
+                val rr = if (k % 2 == 0) r else r * 0.84f
+                val x = cx + rr * cos(a).toFloat(); val y = cy + rr * sin(a).toFloat()
+                if (k == 0) moveTo(x, y) else lineTo(x, y)
+            }
+            close()
+        }
+        else -> hexPath(r, rotDeg)
+    }
+
+    private fun polyPath(n: Int, r: Float, rotDeg: Float): Path {
+        val p = Path()
+        for (k in 0..n) {
+            val a = Math.toRadians((rotDeg + 30 + k * 360.0 / n))
+            val x = cx + r * cos(a).toFloat(); val y = cy + r * sin(a).toFloat()
+            if (k == 0) p.moveTo(x, y) else p.lineTo(x, y)
+        }
+        p.close(); return p
+    }
+
+    /** デザインごとの飾り（頂点の光、コイル、光線など） */
+    private fun drawCoreExtras(c: Canvas, hr: Float, t: Float, beat: Float) {
+        val nodeR = unit * (0.1f + 0.06f * beat)
+        when (coreStyle) {
+            1 -> { // オーブ：まわりを回るコイルと、内側の三重の輪
+                for (k in 0 until 12) {
+                    val a = t * 18f + k * 30f
+                    arcAt(c, hr * 1.1f, 7f + 5f * beat, a, 16f, cyan(if (k % 3 == 0) 255 else 150), k % 3 == 0)
+                }
+                for (k in 1..3) { stroke.strokeWidth = 1.2f; stroke.color = cyan(60 + k * 25); c.drawCircle(cx, cy, hr * (0.3f + k * 0.15f), stroke) }
+            }
+            2 -> { // ダイヤモンド：逆回転する2枚目の菱形で八芒星に
+                stroke.strokeWidth = 2f; stroke.color = cyan(200); c.drawPath(polyPath(4, hr * 0.94f, -t * 9f + 60f), stroke)
+                glow.strokeWidth = 10f; glow.color = cyan((80 + 120 * beat).toInt()); c.drawPath(polyPath(4, hr * 0.94f, -t * 9f + 60f), glow)
+                for (k in 0 until 4) {
+                    val a = Math.toRadians((t * 6f + 15 + 30 + k * 90).toDouble())
+                    fill.color = Color.WHITE; c.drawCircle(cx + hr * cos(a).toFloat(), cy + hr * sin(a).toFloat(), nodeR * 1.3f, fill)
+                }
+            }
+            3 -> { // オクタ：中心から伸びるスポーク
+                for (k in 0 until 8) {
+                    val a = Math.toRadians((t * 6f - 7.5f + 30 + k * 45).toDouble())
+                    val ca = cos(a).toFloat(); val sa = sin(a).toFloat()
+                    stroke.strokeWidth = 1.5f; stroke.color = cyan(110)
+                    c.drawLine(cx + ca * hr * 0.78f, cy + sa * hr * 0.78f, cx + ca * hr, cy + sa * hr, stroke)
+                    fill.color = cyan(230); c.drawCircle(cx + ca * hr, cy + sa * hr, nodeR, fill)
+                }
+            }
+            4 -> { // パルサー：外へ放たれる光線
+                for (k in 0 until 12) {
+                    val a = Math.toRadians((t * 6f + k * 30f).toDouble())
+                    val q = ((t * 0.8f + k * 0.083f) % 1f)
+                    val r0 = hr * (1.05f + q * 0.35f); val r1 = r0 + hr * 0.12f
+                    stroke.strokeWidth = 2.5f; stroke.color = cyan((220 * (1f - q)).toInt())
+                    c.drawLine(cx + r0 * cos(a).toFloat(), cy + r0 * sin(a).toFloat(), cx + r1 * cos(a).toFloat(), cy + r1 * sin(a).toFloat(), stroke)
+                }
+            }
+            else -> { // ヘキサ（標準）：頂点の光
+                for (k in 0 until 6) {
+                    val a = Math.toRadians((t * 6f + 30 + k * 60).toDouble())
+                    fill.color = cyan(230)
+                    c.drawCircle(cx + hr * cos(a).toFloat(), cy + hr * sin(a).toFloat(), nodeR, fill)
+                }
+            }
+        }
+    }
+
+    /** 心電図のような波形を、コアの左右に流す */
+    private fun drawHeartLine(c: Canvas, t: Float, bpm: Float, env: Float) {
+        val x0 = coreR * 0.55f; val x1 = coreR * 0.77f   // コアとアプリのリングの間
+        val w = x1 - x0
+        val amp = coreR * 0.09f
+        val path = Path()
+        for (side in intArrayOf(-1, 1)) {
+            path.reset()
+            val steps = 48
+            for (i in 0..steps) {
+                val f = i / steps.toFloat()
+                // 外側ほど古い波形：時間をさかのぼって描く
+                val ph = ((t - f * 0.9f) * bpm / 60f % 1f + 1f) % 1f
+                val v = when {
+                    ph < 0.03f -> -0.25f * (ph / 0.03f)
+                    ph < 0.06f -> -0.25f + 1.25f * ((ph - 0.03f) / 0.03f)
+                    ph < 0.09f -> 1f - 1.6f * ((ph - 0.06f) / 0.03f)
+                    ph < 0.12f -> -0.6f + 0.6f * ((ph - 0.09f) / 0.03f)
+                    ph in 0.22f..0.30f -> 0.35f * sin(((ph - 0.22f) / 0.08f) * PI.toFloat())
+                    else -> 0f
+                }
+                val x = cx + side * (x0 + f * w)
+                val y = cy - v * amp
+                if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
+            }
+            glow.strokeWidth = 8f; glow.color = cyan((160 * env).toInt()); c.drawPath(path, glow)
+            stroke.strokeWidth = 2f; stroke.color = Color.argb((230 * env).toInt(), 220, 250, 255); c.drawPath(path, stroke)
+        }
     }
 
     private fun hexPath(r: Float, rotDeg: Float): Path {

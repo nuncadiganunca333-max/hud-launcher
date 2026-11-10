@@ -113,7 +113,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
         widgetHost = android.appwidget.AppWidgetHost(this, 4711)
         restoreWidget()
         alert = AlertOverlay(this).also { it.listener = this }
-        assistant = AssistantOverlay(this).also { it.listener = this }
+        assistant = AssistantOverlay(this).also { it.listener = this; it.onState = { st -> if (::hud.isInitialized) hud.listening = st == AssistantOverlay.State.LISTENING } }
         drive = DriveView(this).also { it.listener = this }
         root.addView(drive, FrameLayout.LayoutParams(-1, -1))
         scan = ScanOverlay(this, camOwner).also { it.listener = this }
@@ -1413,8 +1413,14 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
                 "顔認識：${if (prefs.getBoolean("faceOn", true)) "ON" else "OFF"}", "${aiName()}が覚えていること", "スキャンモード",
                 "手のジェスチャー：${arrayOf("充電中・ワークショップ時", "常に", "OFF")[prefs.getInt("gestureMode", 0)]}", "外部ディスプレイ表示：${if (prefs.getBoolean("extOn", true)) "ON" else "OFF"}", "パネルの並びを元に戻す", "通知の演出をテスト", "¥ PAY の決済アプリ", "よく使うアプリをスマホ全体の使用時間で判定",
                 "PiP互換モード：${if (pipSafe()) "ON" else "OFF"}", "音楽リングを実際の音に連動：${if (prefs.getBoolean("realSpectrum", false)) "ON" else "OFF"}",
-                "タスク（追加・同期・合言葉）")) { _, w ->
+                "タスク（追加・同期・合言葉）", "ジャービスのデザイン：${HudView.CORE_STYLES[prefs.getInt("coreStyle", 0).coerceIn(0, HudView.CORE_STYLES.size - 1)]}")) { _, w ->
                 when (w) {
+                    27 -> AlertDialog.Builder(this).setTitle("ジャービスのデザイン")
+                        .setSingleChoiceItems(HudView.CORE_STYLES, prefs.getInt("coreStyle", 0)) { d, which ->
+                            prefs.edit().putInt("coreStyle", which).apply(); hud.coreStyle = which
+                            extHud?.hud?.coreStyle = which
+                            SoundFx.play(SoundFx.Fx.DONE); d.dismiss()
+                        }.show()
                     26 -> tasksMenu()
                     0 -> askApiKey(); 1 -> askName(); 2 -> if (useEleven()) pickElevenVoice() else pickVoice(); 3 -> tuneVoice()
                     4 -> AlertDialog.Builder(this).setTitle("声の加工")
