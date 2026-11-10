@@ -360,28 +360,37 @@ class HudView(context: Context) : View(context), SensorEventListener {
             col(2).let { (a, b) -> panels["TASKS"] = RectF(a, r2t, b, bottom) }
             statusStrip.setEmpty()
         } else if (wide) {
-            val colBottom = top + (bottom - top) * 0.78f
-            val lx2 = W * 0.255f; val rx1 = W * 0.745f
-            val lh = colBottom - top
-            panels["SYSTEM"] = RectF(m, top, lx2, top + lh * 0.50f - gap / 2)
-            panels["POWER"] = RectF(m, top + lh * 0.50f + gap / 2, lx2, colBottom)
-            panels["CALENDAR"] = RectF(rx1, top, W - m, top + lh * 0.36f - gap / 2)
-            panels["WEATHER"] = RectF(rx1, top + lh * 0.36f + gap / 2, W - m, top + lh * 0.76f - gap / 2)
-            panels["MEDIA"] = RectF(rx1, top + lh * 0.76f + gap / 2, W - m, colBottom)
-            panels["NETWORK"] = RectF(m, colBottom + gap, W * 0.5f - gap / 2, bottom)
-            panels["TASKS"] = RectF(W * 0.5f + gap / 2, colBottom + gap, W - m, bottom)
-            val modTop = colBottom - unit * 8f
-            panels["MODULE"] = RectF(W * 0.28f, modTop, W * 0.72f, colBottom)
+            // 上段：情報パネル（見るだけのもの）／下段：中央にコア、その両脇に操作するパネル
+            // 親指が届く下半分に、ジャービス（コア）とよく触るものを集める
+            val sideW = W * 0.225f
+            val upH = (bottom - top) * 0.45f
+            val upBottom = top + upH
+            val r1b = top + upH * 0.58f
+            val cw = (W - m * 2 - gap * 2) / 3
+            fun col(i: Int, span: Int = 1) = m + i * (cw + gap) to m + i * (cw + gap) + cw * span + gap * (span - 1)
+            col(0).let { (a, b) -> panels["SYSTEM"] = RectF(a, top, b, r1b - gap / 2) }
+            col(1).let { (a, b) -> panels["CALENDAR"] = RectF(a, top, b, r1b - gap / 2) }
+            col(2).let { (a, b) -> panels["WEATHER"] = RectF(a, top, b, r1b - gap / 2) }
+            panels["TASKS"] = RectF(m, r1b + gap / 2, W - m, upBottom)
+            val lowTop = upBottom + gap * 2.2f
+            val lowMid = lowTop + (bottom - lowTop) * 0.5f
+            panels["POWER"] = RectF(m, lowTop, m + sideW, lowMid - gap / 2)
+            panels["NETWORK"] = RectF(m, lowMid + gap / 2, m + sideW, bottom)
+            panels["MODULE"] = RectF(W - m - sideW, lowTop, W - m, lowMid - gap / 2)
+            panels["MEDIA"] = RectF(W - m - sideW, lowMid + gap / 2, W - m, bottom)
             statusStrip.setEmpty()
             cx = W / 2
-            val avail = modTop - gap - top
-            cy = top + avail * 0.5f
-            coreR = min(W * 0.2f, avail * 0.36f)
+            val centerHalfW = (W - m * 2 - sideW * 2 - gap * 2) / 2
+            val lowH = bottom - lowTop
+            coreR = min(centerHalfW / 1.36f, lowH / 2f / 1.62f)
+            cy = lowTop + lowH * 0.5f
         } else {
-            cx = W / 2; coreR = W * 0.345f
-            cy = top + coreR * 1.2f
-            val pTop = cy + coreR * 1.24f
-            val ph = bottom - pTop
+            // 外画面：情報パネルを上に、コアを親指の届く下に
+            cx = W / 2; coreR = W * 0.33f
+            cy = bottom - coreR * 1.62f
+            val pTop = top
+            val pBottom = cy - coreR * 1.62f - gap
+            val ph = pBottom - pTop
             val mid = W / 2
             val r1 = pTop + ph * 0.26f; val r2 = pTop + ph * 0.54f; val r3 = pTop + ph * 0.75f
             panels["SYSTEM"] = RectF(m, pTop, mid - gap / 2, r1 - gap / 2)
@@ -389,7 +398,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
             panels["MEDIA"] = RectF(m, r1 + gap / 2, mid - gap / 2, r2 - gap / 2)
             panels["CALENDAR"] = RectF(mid + gap / 2, r1 + gap / 2, W - m, r2 - gap / 2)
             panels["TASKS"] = RectF(m, r2 + gap / 2, W - m, r3 - gap / 2)
-            panels["MODULE"] = RectF(m, r3 + gap / 2, W - m, bottom)
+            panels["MODULE"] = RectF(m, r3 + gap / 2, W - m, pBottom)
             statusStrip.setEmpty()
         }
         applySavedOrder()
@@ -514,7 +523,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
     // ======================= FRAME =======================
     private fun ease(p: Float) = 1f - (1f - p.coerceIn(0f, 1f)).pow(3)
 
-    private fun layoutKey() = if (workshop) "ws" else if (wide) "wide" else "narrow"
+    private fun layoutKey() = if (workshop) "ws" else if (wide) "wide2" else "narrow2"
     private val prefsH by lazy { context.getSharedPreferences("hud", Context.MODE_PRIVATE) }
 
     /** パネルの並び（指で入れ替えた順）を反映。MODULE（ウィジェット）は固定 */
@@ -694,6 +703,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
             val ts = RectF(0f, 0f, width.toFloat(), topStrip.bottom + unit * 0.3f)
             c.drawBitmap(fg, Rect(ts.left.toInt(), ts.top.toInt(), ts.right.toInt(), ts.bottom.toInt()), ts, null)
             drawTopStrip(c, t, now)
+            drawCoreLinks(c, t)
             var k = 0
             for ((name, r) in panels) {
                 c.save()
@@ -799,6 +809,45 @@ class HudView(context: Context) : View(context), SensorEventListener {
             }
         }
         mono.color = CYAN
+    }
+
+    /** コアから近くのパネルへ伸びる回路の線と、その上を流れる光（パネルが開いているときだけ） */
+    private fun drawCoreLinks(c: Canvas, t: Float) {
+        if (workshop || coreR <= 0f) return
+        val ox = cx + dX * 0.5f; val oy = cy + dY * 0.5f
+        var k = 0
+        for ((name, r) in panels) {
+            val tx = cx.coerceIn(r.left, r.right); val ty = cy.coerceIn(r.top, r.bottom)
+            val d = hypot(tx - ox, ty - oy)
+            if (d > coreR * 3.2f || d < coreR * 1.3f) continue
+            val ang = atan2(ty - oy, tx - ox)
+            val sx = ox + cos(ang) * coreR * 1.3f; val sy = oy + sin(ang) * coreR * 1.3f
+            // 横か縦に一度折れる、基板の配線のような線
+            val horiz = abs(tx - sx) > abs(ty - sy)
+            val mx = if (horiz) sx + (tx - sx) * 0.55f else sx
+            val my = if (horiz) sy else sy + (ty - sy) * 0.55f
+            val pts = floatArrayOf(sx, sy, mx, my, if (horiz) mx else tx, if (horiz) ty else my, tx, ty)
+            stroke.strokeWidth = 1.6f; stroke.color = cyan(70)
+            c.drawLine(pts[0], pts[1], pts[2], pts[3], stroke)
+            c.drawLine(pts[2], pts[3], pts[4], pts[5], stroke)
+            c.drawLine(pts[4], pts[5], pts[6], pts[7], stroke)
+            fill.color = cyan(160); c.drawCircle(sx, sy, unit * 0.12f, fill)
+            fill.color = cyan(200); c.drawRect(tx - unit * 0.14f, ty - unit * 0.14f, tx + unit * 0.14f, ty + unit * 0.14f, fill)
+            // 光のパルスがコアからパネルへ流れる
+            val segs = floatArrayOf(hypot(pts[2] - pts[0], pts[3] - pts[1]), hypot(pts[4] - pts[2], pts[5] - pts[3]), hypot(pts[6] - pts[4], pts[7] - pts[5]))
+            val total = segs.sum().coerceAtLeast(1f)
+            for (pulse in 0 until 2) {
+                var dist = (((t * 0.45f + k * 0.37f + pulse * 0.5f) % 1f)) * total
+                var i = 0
+                while (i < 2 && dist > segs[i]) { dist -= segs[i]; i++ }
+                val f = (dist / segs[i].coerceAtLeast(1f)).coerceIn(0f, 1f)
+                val px0 = pts[i * 2] + (pts[i * 2 + 2] - pts[i * 2]) * f
+                val py0 = pts[i * 2 + 1] + (pts[i * 2 + 3] - pts[i * 2 + 1]) * f
+                glow.strokeWidth = 10f; glow.color = cyan(200); c.drawPoint(px0, py0, glow)
+                fill.color = Color.WHITE; c.drawCircle(px0, py0, unit * 0.09f, fill)
+            }
+            k++
+        }
     }
 
     // ===== ② hologram projector base =====
