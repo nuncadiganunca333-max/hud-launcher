@@ -397,19 +397,19 @@ class HudView(context: Context) : View(context), SensorEventListener {
             cy = lowTop + lowH * 0.5f
         } else {
             // 外画面：情報パネルを上に、コアを親指の届く下に
-            cx = W / 2; coreR = W * 0.33f
-            cy = bottom - coreR * 1.62f
+            // 細長い画面に詰め込みすぎないよう、パネルは4枚に絞って1枚ずつを大きく見せる
+            // （音楽はコアの周りのリングに出るので、メディアとカレンダーは内画面だけ）
+            cx = W / 2; coreR = W * 0.30f
+            cy = bottom - coreR * 1.5f
             val pTop = top
-            val pBottom = cy - coreR * 1.62f - gap
+            val pBottom = cy - coreR * 1.58f
             val ph = pBottom - pTop
             val mid = W / 2
-            val r1 = pTop + ph * 0.26f; val r2 = pTop + ph * 0.54f; val r3 = pTop + ph * 0.75f
+            val r1 = pTop + ph * 0.30f; val r2 = pTop + ph * 0.67f
             panels["SYSTEM"] = RectF(m, pTop, mid - gap / 2, r1 - gap / 2)
             panels["WEATHER"] = RectF(mid + gap / 2, pTop, W - m, r1 - gap / 2)
-            panels["MEDIA"] = RectF(m, r1 + gap / 2, mid - gap / 2, r2 - gap / 2)
-            panels["CALENDAR"] = RectF(mid + gap / 2, r1 + gap / 2, W - m, r2 - gap / 2)
-            panels["TASKS"] = RectF(m, r2 + gap / 2, W - m, r3 - gap / 2)
-            panels["MODULE"] = RectF(m, r3 + gap / 2, W - m, pBottom)
+            panels["TASKS"] = RectF(m, r1 + gap / 2, W - m, r2 - gap / 2)
+            panels["MODULE"] = RectF(m, r2 + gap / 2, W - m, pBottom)
             statusStrip.setEmpty()
         }
         applySavedOrder()
@@ -534,7 +534,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
     // ======================= FRAME =======================
     private fun ease(p: Float) = 1f - (1f - p.coerceIn(0f, 1f)).pow(3)
 
-    private fun layoutKey() = if (workshop) "ws" else if (wide) "wide2" else "narrow2"
+    private fun layoutKey() = if (workshop) "ws" else if (wide) "wide2" else "narrow3"
     private val prefsH by lazy { context.getSharedPreferences("hud", Context.MODE_PRIVATE) }
 
     /** パネルの並び（指で入れ替えた順）を反映。MODULE（ウィジェット）は固定 */
