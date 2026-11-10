@@ -2034,7 +2034,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
     private fun drawCalendar(c: Canvas, r: RectF, now: Calendar) {
         if (calendarLinked && expanded == null) {
             label.textAlign = Paint.Align.RIGHT; label.textSize = headerH() * 0.42f; label.color = cyan(140); label.letterSpacing = 0.15f
-            c.drawText("LONG-PRESS TO EDIT", r.right - headerH() * 1.6f, r.top + headerH() * 0.66f, label)
+            if (label.measureText("LONG-PRESS TO EDIT") < r.width() * 0.5f) c.drawText("LONG-PRESS TO EDIT", r.right - headerH() * 1.6f, r.top + headerH() * 0.66f, label)
             label.letterSpacing = 0f; label.color = CYAN
             return
         }
@@ -2360,7 +2360,9 @@ class HudView(context: Context) : View(context), SensorEventListener {
     private fun drawModule(c: Canvas, r: RectF, t: Float) {
         val b = moduleBody() ?: return
         label.textAlign = Paint.Align.RIGHT; label.textSize = headerH() * 0.42f; label.color = cyan(140); label.letterSpacing = 0.15f
-        c.drawText(if (moduleLinked) "LONG-PRESS HEADER TO EDIT" else "", r.right - headerH() * 1.6f, r.top + headerH() * 0.66f, label)
+        // 幅の狭いパネルでは見出しと重なるので短くする（それでも入らなければ出さない）
+        val hint = if (!moduleLinked) "" else if (label.measureText("LONG-PRESS HEADER TO EDIT") < r.width() * 0.5f) "LONG-PRESS HEADER TO EDIT" else "HOLD TO EDIT"
+        if (label.measureText(hint) < r.width() * 0.42f) c.drawText(hint, r.right - headerH() * 1.6f, r.top + headerH() * 0.66f, label)
         label.letterSpacing = 0f
         if (moduleLinked) return
         val fs = min(unit * 0.7f, b.height() / 4f)
