@@ -2132,12 +2132,12 @@ ${memories().ifEmpty { listOf("（まだなし）") }.joinToString("\n") { "・$
         })
         box.addView(header)
         box.addView(TextView(this).apply {
-            text = "タップで起動 ／ 長押しでリングに登録・解除 ／ 右端の索引をなぞるとジャンプ"
+            text = "タップで起動 ／ 長押しでリングに登録・解除"
             setTextColor(Color.argb(160, 0, 229, 255)); textSize = 12f
             setPadding(0, dp(2), 0, dp(10))
         })
         search = EditText(this).apply {
-            hint = "SEARCH ― かな・カナ・ローマ字どれでも"; setHintTextColor(Color.argb(110, 0, 229, 255))
+            hint = "SEARCH"; setHintTextColor(Color.argb(110, 0, 229, 255))
             imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_GO
             // 決定キーで、いちばん上の候補を起動
             setOnEditorActionListener { v, _, _ ->

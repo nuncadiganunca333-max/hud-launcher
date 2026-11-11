@@ -2284,8 +2284,6 @@ class HudView(context: Context) : View(context), SensorEventListener {
         if (tasks.isEmpty()) {
             label.textAlign = Paint.Align.CENTER; label.textSize = fs; label.color = cyan(150)
             c.drawText(tasksNote.ifEmpty { "タスクはありません" }, b.centerX(), b.centerY() + fs * 0.3f, label)
-            label.textSize = fs * 0.72f; label.color = cyan(100)
-            c.drawText("タップでメニュー（同期・追加・診断）", b.centerX(), b.centerY() + fs * 1.6f, label)
             label.color = CYAN; return
         }
         val rowH = fs * (if (big) 2.7f else 1.95f)
