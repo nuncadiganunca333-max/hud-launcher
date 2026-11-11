@@ -70,6 +70,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
         fun onCoreLongPress()
         fun onModuleRect(r: RectF)
         fun onModuleEdit()
+        fun onModuleSwipe(dir: Int) {}
         fun onCalendarRect(r: RectF?)
         fun onCalendarEdit()
         fun onPanelsAlpha(a: Float)
@@ -143,6 +144,10 @@ class HudView(context: Context) : View(context), SensorEventListener {
     var modulePages = 0
         set(v) { field = v; invalidate() }
     var modulePage = 0
+        set(v) { field = v; invalidate() }
+    /** 外画面ではMEDIAパネルがないので、MODULEの1ページとして再生コントロールを出す */
+    val mediaInModule get() = panels["MEDIA"] == null && panels["MODULE"] != null
+    var moduleMediaPage = false
         set(v) { field = v; invalidate() }
     var calendarLinked = false
         set(v) { field = v; if (width > 0) relayout(width, height) else invalidate() }
@@ -296,6 +301,9 @@ class HudView(context: Context) : View(context), SensorEventListener {
             val start = e1 ?: return false
             // 画面の下のほうから上へ払うと、どこからでもアプリ一覧
             if (start.y > height * 0.84f && vy < -900 && abs(vy) > abs(vx)) { SoundFx.play(SoundFx.Fx.OPEN); listener?.onOpenDrawer(); return true }
+            if (mediaInModule && panels["MODULE"]?.contains(start.x, start.y) == true && abs(vx) > 600 && abs(vx) > abs(vy) * 1.3f) {
+                listener?.onModuleSwipe(if (vx < 0) 1 else -1); return true
+            }
             val panel = panels.entries.firstOrNull { it.key != "MODULE" && it.value.contains(start.x, start.y) }?.key
             if (panel != null && max(abs(vx), abs(vy)) > 1500) {
                 if (abs(vx) > abs(vy)) flingPanel(panel, if (vx > 0) 1 else -1, 0) else flingPanel(panel, 0, if (vy > 0) 1 else -1)
@@ -798,7 +806,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
         when (name) {
             "SYSTEM" -> drawSystem(c, r, t); "POWER" -> drawPower(c, r, t)
             "CALENDAR" -> drawCalendar(c, r, now); "WEATHER" -> drawWeather(c, r, t)
-            "MEDIA" -> drawMedia(c, r, t); "MODULE" -> drawModule(c, r, t)
+            "MEDIA" -> drawMedia(c, r, t); "MODULE" -> if (moduleMediaPage && mediaInModule) { drawMedia(c, r, t); drawModuleDots(c, r) } else drawModule(c, r, t)
             "NETWORK" -> drawNetwork(c, r, t)
             "TASKS" -> drawTasks(c, r, t)
         }
@@ -2360,20 +2368,24 @@ class HudView(context: Context) : View(context), SensorEventListener {
         label.letterSpacing = 0f; label.color = CYAN
     }
 
+    private fun drawModuleDots(c: Canvas, r: RectF) {
+        if (modulePages < 2) return
+        val dr = unit * 0.11f; val gapD = unit * 0.42f
+        val y = r.bottom - unit * 0.18f
+        val x0 = r.centerX() - (modulePages - 1) * gapD / 2
+        for (i in 0 until modulePages) {
+            fill.color = if (i == modulePage) Color.WHITE else cyan(90)
+            c.drawCircle(x0 + i * gapD, y, if (i == modulePage) dr * 1.3f else dr, fill)
+        }
+    }
+
     private fun drawModule(c: Canvas, r: RectF, t: Float) {
         val b = moduleBody() ?: return
         label.textAlign = Paint.Align.RIGHT; label.textSize = headerH() * 0.42f; label.color = cyan(140); label.letterSpacing = 0.15f
         // 幅の狭いパネルでは見出しと重なるので短くする（それでも入らなければ出さない）
         val hint = if (!moduleLinked) "" else if (label.measureText("LONG-PRESS HEADER TO EDIT") < r.width() * 0.5f) "LONG-PRESS HEADER TO EDIT" else "HOLD TO EDIT"
         if (label.measureText(hint) < r.width() * 0.42f) c.drawText(hint, r.right - headerH() * 1.6f, r.top + headerH() * 0.66f, label)
-        if (modulePages > 1) {
-            val dr = unit * 0.11f; val gapD = unit * 0.42f
-            val y = r.bottom - unit * 0.18f
-            val x0 = r.centerX() - (modulePages - 1) * gapD / 2
-            for (i in 0 until modulePages) {
-                fill.color = if (i == modulePage) Color.WHITE else cyan(90)
-                c.drawCircle(x0 + i * gapD, y, if (i == modulePage) dr * 1.3f else dr, fill)
-            }
+        drawModuleDots(c, r)
         }
         label.letterSpacing = 0f
         if (moduleLinked) return
@@ -2483,7 +2495,18 @@ class HudView(context: Context) : View(context), SensorEventListener {
             }
             return
         }
-        panels["MODULE"]?.let { if (it.contains(x, y)) { if (!moduleLinked) listener?.onModuleEdit(); return } }
+        panels["MODULE"]?.let {
+            if (it.contains(x, y)) {
+                if (moduleMediaPage && mediaInModule) {
+                    if (media != null) {
+                        for ((k, r) in mediaBtns) if (r.contains(x, y)) { SoundFx.play(SoundFx.Fx.TAP); listener?.onMediaAction(k); return }
+                        if (mediaArt.contains(x, y)) listener?.onMediaAction("open")
+                    }
+                    return
+                }
+                if (!moduleLinked) listener?.onModuleEdit(); return
+            }
+        }
         if (panels["MEDIA"]?.contains(x, y) == true && media != null) {
             for ((k, r) in mediaBtns) if (r.contains(x, y)) { SoundFx.play(SoundFx.Fx.TAP); listener?.onMediaAction(k); return }
             if (mediaArt.contains(x, y)) { listener?.onMediaAction("open"); return }

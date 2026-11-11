@@ -569,15 +569,28 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
         afterModuleChange()
     }
 
+    /** ページ数：ウィジェット＋（外画面なら）再生コントロール */
+    private fun modPageCount() = modViews.size + if (::hud.isInitialized && hud.mediaInModule) 1 else 0
+
+    override fun onModuleSwipe(dir: Int) = switchModule(dir)
+
     private fun afterModuleChange() {
+        if (modIndex >= modPageCount()) modIndex = 0
         widgetView = modViews.getOrNull(modIndex)
         widgetView?.let { slotViews["module"] = it } ?: slotViews.remove("module")
         hud.moduleLinked = modViews.isNotEmpty()
-        hud.modulePages = modViews.size; hud.modulePage = modIndex
+        hud.modulePages = modPageCount(); hud.modulePage = modIndex
+        hud.moduleMediaPage = modIndex >= modViews.size && hud.mediaInModule
         placeModule()
     }
 
     private fun placeModule() {
+        // 内画面⇔外画面の切り替えでページ数が変わったら合わせる
+        if (::hud.isInitialized) {
+            if (modIndex >= modPageCount()) modIndex = 0
+            hud.modulePages = modPageCount(); hud.modulePage = modIndex
+            hud.moduleMediaPage = modIndex >= modViews.size && hud.mediaInModule
+        }
         val rect = slotRects["module"]
         modViews.forEachIndexed { i, v ->
             if (rect == null || rect.isEmpty) { v.visibility = View.GONE; return@forEachIndexed }
@@ -589,19 +602,20 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
 
     /** dir = +1 で次、-1 で前へ。横にすべって入れ替わる */
     private fun switchModule(dir: Int) {
-        if (modViews.size < 2) return
-        val old = modViews[modIndex]
-        modIndex = (modIndex + dir + modViews.size) % modViews.size
-        val nv = modViews[modIndex]
+        val n = modPageCount()
+        if (n < 2) return
+        val oldV = modViews.getOrNull(modIndex)
+        modIndex = (modIndex + dir + n) % n
+        val nv = modViews.getOrNull(modIndex)
         val w = (slotRects["module"]?.width() ?: 600f)
-        nv.visibility = View.VISIBLE; nv.translationX = dir * w; nv.alpha = 0f
-        nv.animate().translationX(0f).alpha(1f).setDuration(260).start()
-        old.animate().translationX(-dir * w).alpha(0f).setDuration(260).withEndAction {
-            old.visibility = View.GONE; old.translationX = 0f; old.alpha = 1f
-        }.start()
+        nv?.let { it.visibility = View.VISIBLE; it.translationX = dir * w; it.alpha = 0f; it.animate().translationX(0f).alpha(1f).setDuration(260).start() }
+        oldV?.animate()?.translationX(-dir * w)?.alpha(0f)?.setDuration(260)?.withEndAction {
+            oldV.visibility = View.GONE; oldV.translationX = 0f; oldV.alpha = 1f
+        }?.start()
         SoundFx.play(SoundFx.Fx.TAP)
-        widgetView = nv; slotViews["module"] = nv
+        widgetView = nv; nv?.let { slotViews["module"] = it }
         hud.modulePage = modIndex
+        hud.moduleMediaPage = nv == null
         prefs.edit().putInt("widgetIdx", modIndex).apply()
     }
 
@@ -613,7 +627,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
             when (e.actionMasked) {
                 android.view.MotionEvent.ACTION_DOWN -> {
                     downX = e.x; downY = e.y
-                    tracking = modViews.size > 1 && slotRects["module"]?.contains(e.x, e.y) == true
+                    tracking = modPageCount() > 1 && modIndex < modViews.size && slotRects["module"]?.contains(e.x, e.y) == true
                 }
                 android.view.MotionEvent.ACTION_MOVE -> if (tracking) {
                     val dx = e.x - downX; val dy = e.y - downY
@@ -677,8 +691,9 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
         if (slot == "module") {
             if (modViews.isEmpty()) { pendingModReplace = -1; pickWidget(slot); return }
             AlertDialog.Builder(this).setTitle(title)
-                .setItems(arrayOf("ウィジェットを追加", "このウィジェットを変更", "このウィジェットを外す")) { _, w ->
-                    when (w) { 0 -> { pendingModReplace = -1; pickWidget(slot) }; 1 -> { pendingModReplace = modIndex; pickWidget(slot) }; else -> removeWidget(slot) }
+                .setItems(arrayOf("ウィジェットを変更", "ウィジェットを外す")) { _, w ->
+                    if (modIndex >= modViews.size) modIndex = 0
+                    if (w == 0) { pendingModReplace = modIndex; pickWidget(slot) } else removeWidget(slot)
                 }.show()
             return
         }
