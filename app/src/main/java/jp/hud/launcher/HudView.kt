@@ -2386,7 +2386,6 @@ class HudView(context: Context) : View(context), SensorEventListener {
         val hint = if (!moduleLinked) "" else if (label.measureText("LONG-PRESS HEADER TO EDIT") < r.width() * 0.5f) "LONG-PRESS HEADER TO EDIT" else "HOLD TO EDIT"
         if (label.measureText(hint) < r.width() * 0.42f) c.drawText(hint, r.right - headerH() * 1.6f, r.top + headerH() * 0.66f, label)
         drawModuleDots(c, r)
-        }
         label.letterSpacing = 0f
         if (moduleLinked) return
         val fs = min(unit * 0.7f, b.height() / 4f)
