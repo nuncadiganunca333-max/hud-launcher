@@ -108,7 +108,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
         root.addView(glBg, FrameLayout.LayoutParams(-1, -1))
         hud = HudView(this).also { it.listener = this; it.gl = glBg }
         root.addView(hud, FrameLayout.LayoutParams(-1, -1))
-        moduleFrame = FrameLayout(this)
+        moduleFrame = SwipeFrame(this)
         root.addView(moduleFrame, FrameLayout.LayoutParams(-1, -1))
         widgetHost = android.appwidget.AppWidgetHost(this, 4711)
         restoreWidget()
@@ -511,10 +511,15 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
     }
 
     private fun placeWidget(slot: String) {
+        if (slot == "module") { placeModule(); return }
         val v = slotViews[slot] ?: return
         val rect = slotRects[slot]
         if (rect == null || rect.isEmpty) { v.visibility = View.GONE; return }
         v.visibility = View.VISIBLE
+        layoutWidget(v, rect)
+    }
+
+    private fun layoutWidget(v: android.appwidget.AppWidgetHostView, rect: android.graphics.RectF) {
         val d = resources.displayMetrics.density
         val info = v.appWidgetInfo
         // ウィジェット本来の高さで描画してから、枠に収まるよう縮小する（詰め込みによる文字の重なり防止）
@@ -536,7 +541,98 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
         }
     }
 
-    private fun restoreWidget() { restoreSlot("module"); restoreSlot("cal") }
+    private fun restoreWidget() { restoreModule(); restoreSlot("cal") }
+
+    // ---------- MODULE：複数のウィジェットを横スワイプで切り替え ----------
+    private val modViews = ArrayList<android.appwidget.AppWidgetHostView>()
+    private var modIndex = 0
+    private var pendingModReplace = -1   // -1 = 追加、0以上 = その番号を差し替え
+
+    private fun modIds(): MutableList<Int> {
+        prefs.getString("widgetIds", null)?.let { return it.split(",").mapNotNull { x -> x.toIntOrNull() }.toMutableList() }
+        val one = prefs.getInt("widgetId", -1)          // 以前の1枚だけの保存から引き継ぐ
+        return if (one == -1) mutableListOf() else mutableListOf(one)
+    }
+    private fun saveModIds(l: List<Int>) = prefs.edit().putString("widgetIds", l.joinToString(",")).putInt("widgetIdx", modIndex).apply()
+
+    private fun restoreModule() {
+        modViews.forEach { moduleFrame.removeView(it) }; modViews.clear()
+        val awm = android.appwidget.AppWidgetManager.getInstance(this)
+        val ids = modIds().filter { awm.getAppWidgetInfo(it) != null }
+        for (id in ids) {
+            val info = awm.getAppWidgetInfo(id) ?: continue
+            val v = widgetHost.createView(applicationContext, id, info); v.setAppWidget(id, info)
+            moduleFrame.addView(v); modViews += v
+        }
+        modIndex = prefs.getInt("widgetIdx", 0).coerceIn(0, (modViews.size - 1).coerceAtLeast(0))
+        saveModIds(ids)
+        afterModuleChange()
+    }
+
+    private fun afterModuleChange() {
+        widgetView = modViews.getOrNull(modIndex)
+        widgetView?.let { slotViews["module"] = it } ?: slotViews.remove("module")
+        hud.moduleLinked = modViews.isNotEmpty()
+        hud.modulePages = modViews.size; hud.modulePage = modIndex
+        placeModule()
+    }
+
+    private fun placeModule() {
+        val rect = slotRects["module"]
+        modViews.forEachIndexed { i, v ->
+            if (rect == null || rect.isEmpty) { v.visibility = View.GONE; return@forEachIndexed }
+            layoutWidget(v, rect)
+            v.translationX = 0f
+            v.visibility = if (i == modIndex) View.VISIBLE else View.GONE
+        }
+    }
+
+    /** dir = +1 で次、-1 で前へ。横にすべって入れ替わる */
+    private fun switchModule(dir: Int) {
+        if (modViews.size < 2) return
+        val old = modViews[modIndex]
+        modIndex = (modIndex + dir + modViews.size) % modViews.size
+        val nv = modViews[modIndex]
+        val w = (slotRects["module"]?.width() ?: 600f)
+        nv.visibility = View.VISIBLE; nv.translationX = dir * w; nv.alpha = 0f
+        nv.animate().translationX(0f).alpha(1f).setDuration(260).start()
+        old.animate().translationX(-dir * w).alpha(0f).setDuration(260).withEndAction {
+            old.visibility = View.GONE; old.translationX = 0f; old.alpha = 1f
+        }.start()
+        SoundFx.play(SoundFx.Fx.TAP)
+        widgetView = nv; slotViews["module"] = nv
+        hud.modulePage = modIndex
+        prefs.edit().putInt("widgetIdx", modIndex).apply()
+    }
+
+    /** ウィジェットの上での横スワイプだけを横取りして、ページ切り替えに使う（タップはウィジェットへそのまま渡す） */
+    private inner class SwipeFrame(ctx: android.content.Context) : FrameLayout(ctx) {
+        private var downX = 0f; private var downY = 0f; private var tracking = false
+        private val slop = android.view.ViewConfiguration.get(ctx).scaledTouchSlop * 2
+        override fun onInterceptTouchEvent(e: android.view.MotionEvent): Boolean {
+            when (e.actionMasked) {
+                android.view.MotionEvent.ACTION_DOWN -> {
+                    downX = e.x; downY = e.y
+                    tracking = modViews.size > 1 && slotRects["module"]?.contains(e.x, e.y) == true
+                }
+                android.view.MotionEvent.ACTION_MOVE -> if (tracking) {
+                    val dx = e.x - downX; val dy = e.y - downY
+                    if (kotlin.math.abs(dx) > slop && kotlin.math.abs(dx) > kotlin.math.abs(dy) * 1.5f) return true
+                }
+            }
+            return false
+        }
+        override fun onTouchEvent(e: android.view.MotionEvent): Boolean {
+            if (!tracking || e.actionMasked == android.view.MotionEvent.ACTION_DOWN) return false
+            if (e.actionMasked == android.view.MotionEvent.ACTION_UP) {
+                val dx = e.x - downX
+                if (kotlin.math.abs(dx) > slop) switchModule(if (dx < 0) 1 else -1)
+                tracking = false
+            }
+            return true
+        }
+    }
+
 
     private fun restoreSlot(slot: String) {
         val id = prefs.getInt(slotKey(slot), -1)
@@ -559,6 +655,13 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
     }
 
     private fun removeWidget(slot: String) {
+        if (slot == "module") {
+            val ids = modIds()
+            if (modIndex in ids.indices) { widgetHost.deleteAppWidgetId(ids[modIndex]); ids.removeAt(modIndex) }
+            modViews.getOrNull(modIndex)?.let { moduleFrame.removeView(it); modViews.removeAt(modIndex) }
+            modIndex = modIndex.coerceAtMost((modViews.size - 1).coerceAtLeast(0))
+            saveModIds(ids); afterModuleChange(); return
+        }
         val id = prefs.getInt(slotKey(slot), -1)
         if (id != -1) widgetHost.deleteAppWidgetId(id)
         prefs.edit().remove(slotKey(slot)).apply()
@@ -571,6 +674,14 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
     override fun onCalendarEdit() = editSlot("cal", "CALENDAR")
 
     private fun editSlot(slot: String, title: String) {
+        if (slot == "module") {
+            if (modViews.isEmpty()) { pendingModReplace = -1; pickWidget(slot); return }
+            AlertDialog.Builder(this).setTitle(title)
+                .setItems(arrayOf("ウィジェットを追加", "このウィジェットを変更", "このウィジェットを外す")) { _, w ->
+                    when (w) { 0 -> { pendingModReplace = -1; pickWidget(slot) }; 1 -> { pendingModReplace = modIndex; pickWidget(slot) }; else -> removeWidget(slot) }
+                }.show()
+            return
+        }
         if (prefs.getInt(slotKey(slot), -1) != -1) {
             AlertDialog.Builder(this).setTitle(title)
                 .setItems(arrayOf("ウィジェットを変更", if (slot == "cal") "ウィジェットを外す（標準のカレンダー表示に戻す）" else "ウィジェットを外す")) { _, w -> if (w == 0) pickWidget(slot) else removeWidget(slot) }
@@ -619,6 +730,15 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
 
     private fun finishWidget(id: Int) {
         val slot = pendingSlot
+        if (slot == "module") {
+            val ids = modIds()
+            if (pendingModReplace in ids.indices) {
+                if (ids[pendingModReplace] != id) widgetHost.deleteAppWidgetId(ids[pendingModReplace])
+                ids[pendingModReplace] = id; modIndex = pendingModReplace
+            } else { ids += id; modIndex = ids.size - 1 }
+            pendingModReplace = -1
+            saveModIds(ids); restoreModule(); return
+        }
         val old = prefs.getInt(slotKey(slot), -1)
         if (old != -1 && old != id) widgetHost.deleteAppWidgetId(old)
         val info = android.appwidget.AppWidgetManager.getInstance(this).getAppWidgetInfo(id) ?: return

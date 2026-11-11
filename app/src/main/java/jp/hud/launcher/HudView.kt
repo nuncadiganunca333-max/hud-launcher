@@ -138,6 +138,11 @@ class HudView(context: Context) : View(context), SensorEventListener {
     var lowPower = false
     val lastTouchAt get() = lastTouch
     var moduleLinked = false
+    /** MODULEに入っているウィジェットの数と、表示中の番号（2枚以上で下に点を出す） */
+    var modulePages = 0
+        set(v) { field = v; invalidate() }
+    var modulePage = 0
+        set(v) { field = v; invalidate() }
         set(v) { field = v; invalidate() }
     var calendarLinked = false
         set(v) { field = v; if (width > 0) relayout(width, height) else invalidate() }
@@ -2361,6 +2366,15 @@ class HudView(context: Context) : View(context), SensorEventListener {
         // 幅の狭いパネルでは見出しと重なるので短くする（それでも入らなければ出さない）
         val hint = if (!moduleLinked) "" else if (label.measureText("LONG-PRESS HEADER TO EDIT") < r.width() * 0.5f) "LONG-PRESS HEADER TO EDIT" else "HOLD TO EDIT"
         if (label.measureText(hint) < r.width() * 0.42f) c.drawText(hint, r.right - headerH() * 1.6f, r.top + headerH() * 0.66f, label)
+        if (modulePages > 1) {
+            val dr = unit * 0.11f; val gapD = unit * 0.42f
+            val y = r.bottom - unit * 0.18f
+            val x0 = r.centerX() - (modulePages - 1) * gapD / 2
+            for (i in 0 until modulePages) {
+                fill.color = if (i == modulePage) Color.WHITE else cyan(90)
+                c.drawCircle(x0 + i * gapD, y, if (i == modulePage) dr * 1.3f else dr, fill)
+            }
+        }
         label.letterSpacing = 0f
         if (moduleLinked) return
         val fs = min(unit * 0.7f, b.height() / 4f)
