@@ -138,11 +138,11 @@ class HudView(context: Context) : View(context), SensorEventListener {
     var lowPower = false
     val lastTouchAt get() = lastTouch
     var moduleLinked = false
+        set(v) { field = v; invalidate() }
     /** MODULEに入っているウィジェットの数と、表示中の番号（2枚以上で下に点を出す） */
     var modulePages = 0
         set(v) { field = v; invalidate() }
     var modulePage = 0
-        set(v) { field = v; invalidate() }
         set(v) { field = v; invalidate() }
     var calendarLinked = false
         set(v) { field = v; if (width > 0) relayout(width, height) else invalidate() }
