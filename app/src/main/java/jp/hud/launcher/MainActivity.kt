@@ -944,6 +944,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
     }
 
     private fun utteranceDone(id: String) {
+        if (id.startsWith("seg:")) { segLatches.remove(id)?.countDown(); return }
         if (id.startsWith("fx:")) {
             val raw = java.io.File(cacheDir, "tts_out.wav"); val proc = java.io.File(cacheDir, "tts_fx.wav")
             val style = voiceStyle()
@@ -1073,6 +1074,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
 
     private fun stopSpeech() {
         speakSeq++
+        stopReply()
         tts?.stop()
         if (::hud.isInitialized) hud.speaking = false
         fxPlayer?.let { try { it.stop() } catch (e: Exception) { }; it.release() }
@@ -1917,9 +1919,10 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
         unmuteLater()
         sessionActive = false
         recognizer?.cancel()
-        if (farewell && ttsReady) {
-            assistant.state = AssistantOverlay.State.SPEAKING; assistant.reply = "かしこまりました。また呼んでください。"
-            speakOut("かしこまりました。また呼んでください。", "bye")
+        if (farewell && (ttsReady || useEleven())) {
+            val bye = listOf("承知しました。いつでもどうぞ。", "では、待機に戻ります。", "お役に立てたなら何よりです。", "了解です。また後ほど。", "かしこまりました。").random()
+            assistant.state = AssistantOverlay.State.SPEAKING; assistant.reply = bye
+            speakOut(bye, "bye")
         } else { assistant.close(); startWake(600) }
     }
 
@@ -1977,8 +1980,8 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
                 .putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE_MODEL, android.speech.RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
                 .putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE, "ja-JP")
                 .putExtra(android.speech.RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-                .putExtra(android.speech.RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1200L)
-                .putExtra(android.speech.RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 1000L))
+                .putExtra(android.speech.RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 850L)
+                .putExtra(android.speech.RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 650L))
         } catch (e: Exception) { recognizer = null; handler.postDelayed({ if (sessionActive) listen(auto = true) }, 700) }
     }
 
@@ -1995,9 +1998,15 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
         val appNames = apps.joinToString("、") { it.label }
         return """あなたは${callName()}のスマートフォン（Galaxy Z Fold7）のホーム画面に組み込まれたAIアシスタント「${aiName()}」です（中身はAnthropicのClaude）。名前を聞かれたら${aiName()}と名乗ってください。
 ${if (drive.isShowing) "現在${callName()}は運転中です。返答はとくに短く、画面を見なくて済む内容にし、運転の妨げになる操作は勧めないでください。" else ""}
-あなたの人格：英国の老練な執事のように、落ち着いた丁寧語で話す。控えめだが有能で、ときどき乾いた皮肉まじりのユーモアをひとことだけ添える（やりすぎない）。相手は「${callName()}」と呼ぶ。
-返事は「かしこまりました」「承知しました」などで簡潔に始め、聞かれたことに答えたうえで、状況から気づいたことがあれば一歩先の提案をひとつだけ添える（例：雨予報なら傘、電池が少なければ充電、予定が近ければ出発時刻）。
-返答は音声で読み上げられます。話し言葉で1〜3文に短くまとめ、記号・箇条書き・絵文字・URLは使わないでください。
+あなたの人格：映画のジャービスのような、落ち着いた有能な相棒。丁寧語だが堅すぎず、短く要点を言い、ときどき乾いたユーモアや軽い皮肉をひとことだけ混ぜる（毎回ではない）。相手は「${callName()}」と呼ぶが、毎回呼びかける必要はない。
+【話し方のルール】
+・これは音声の会話です。人と話すように、話し言葉で返す。ふだんは1〜2文、長くても3文まで。
+・決まった言い出しを繰り返さない。「かしこまりました」「承知しました」で始めるのは、頼まれた操作をするときにたまにだけ。質問には答えから言う。
+・直前のやりとりを踏まえて返す。前の話の続きなら、それとわかる自然な受け方をする。
+・聞き返しが必要なときは、短く一つだけ聞く。説明口調・前置き・要約・「何かあればお申し付けください」のような締めの決まり文句は言わない。
+・一歩先の提案は、本当に役立つときだけひとこと（例：雨予報なら傘、電池が少なければ充電）。
+・記号・箇条書き・絵文字・URLは使わない。読み上げで不自然になる括弧やカタカナ英語の多用も避ける。
+・相手が「ありがとう、もういいよ」「大丈夫」「またね」など会話を終えたそうなら、ひとことだけ返してから end_conversation を使う。
 通知への返信は、必ず先に「〇〇さんに『…』と返信します。よろしいですか？」と確認し、了承されてからreply_notificationを使うこと。
 端末の操作が必要なときはツールを使い、実行後は結果をひとことで伝えてください。わからないことや最新情報は推測で断言せず、必要ならweb_searchを使ってください。
 テスラ車の直接操作はできません。頼まれたら、ホームのMODULE欄のテスラウィジェットかテスラアプリを案内してください。
@@ -2023,24 +2032,154 @@ ${memories().ifEmpty { listOf("（まだなし）") }.joinToString("\n") { "・$
         hud.thinking = true
         agent.apiKey = apiKey()
         val sys = systemPrompt()
+        endAfterReply = false
+        val canSpeak = ttsReady || useEleven()
+        val gen = replyBegin()
+        val shown = StringBuilder()
         thread {
             val out = try {
-                agent.ask(text, sys, ClaudeAgent.tools()) { name, input -> runTool(name, input) }
+                agent.askStream(text, sys, ClaudeAgent.tools(), { name, input -> runTool(name, input) }) { sentence ->
+                    if (gen != replyGen) return@askStream
+                    if (canSpeak) replySentence(sentence)
+                    runOnUiThread {
+                        if (gen != replyGen || !assistant.isShowing) return@runOnUiThread
+                        hud.thinking = false
+                        shown.append(sentence)
+                        assistant.state = AssistantOverlay.State.SPEAKING; assistant.reply = shown.toString()
+                    }
+                }
             } catch (e: ClaudeAgent.ApiError) { "ERR:" + e.message }
             runOnUiThread {
                 hud.thinking = false
-                if (!assistant.isShowing) return@runOnUiThread
+                if (gen != replyGen || !assistant.isShowing) return@runOnUiThread
                 if (out.startsWith("ERR:")) {
+                    stopReply()
                     SoundFx.play(SoundFx.Fx.ERROR)
                     assistant.state = AssistantOverlay.State.ERROR; assistant.reply = out.removePrefix("ERR:")
                     if (sessionActive) handler.postDelayed({ if (sessionActive && assistant.isShowing) listen(auto = true) }, 2500)
                 } else {
-                    SoundFx.play(SoundFx.Fx.DONE, haptic = false)
                     assistant.state = AssistantOverlay.State.SPEAKING; assistant.reply = out
-                    speakReply(out)
+                    if (canSpeak) { replyDone = true; checkReplyEnd(gen) }
+                    else handler.postDelayed({ onReplyFinished() }, 1500)
                 }
             }
         }
+    }
+
+    // ---------- 返事の読み上げ：届いた文から順に音声にして、途切れずに流す ----------
+    private val replyQueue = java.util.concurrent.LinkedBlockingQueue<String>()
+    private val readyAudio = java.util.ArrayDeque<java.io.File>()
+    private val replyPending = java.util.concurrent.atomic.AtomicInteger(0)
+    private val segLatches = java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.CountDownLatch>()
+    @Volatile private var replyGen = 0
+    private var replyDone = false
+    private var replyPlayer: android.media.MediaPlayer? = null
+    private var endAfterReply = false
+    private val bargeIn = BargeIn {
+        // 話している途中で話しかけられたら、すぐ止めて聞き取りへ
+        runOnUiThread {
+            if (!assistant.isShowing || !sessionActive) return@runOnUiThread
+            stopSpeech()
+            listen(auto = true)
+        }
+    }
+
+    /** 新しい返事を始める。番号を返す（古い返事の残りが混ざらないように使う） */
+    private fun replyBegin(): Int {
+        stopSpeech(); stopWake()
+        handler.removeCallbacks(unmuteRunner); muteBeeps(false)   // 聞き取り中に消した音を戻してから話す
+        val gen = ++replyGen
+        replyQueue.clear(); readyAudio.clear(); replyPending.set(0); replyDone = false
+        thread(name = "reply-voice") {
+            var n = 0
+            while (gen == replyGen) {
+                val text = replyQueue.poll(200, java.util.concurrent.TimeUnit.MILLISECONDS) ?: continue
+                val f = try { renderSegment(text, gen, n++) } catch (e: Exception) { null }
+                runOnUiThread {
+                    if (gen != replyGen) return@runOnUiThread
+                    if (f != null) { readyAudio.add(f); playNextReply(gen) } else { replyPending.decrementAndGet(); checkReplyEnd(gen) }
+                }
+            }
+        }
+        return gen
+    }
+
+    private fun replySentence(s: String) {
+        val clean = s.replace(Regex("[*#`_~>|「」『』（）()\\[\\]]"), "").trim()
+        if (clean.isEmpty() || clean.all { !it.isLetterOrDigit() }) return
+        replyPending.incrementAndGet()
+        replyQueue.add(clean)
+    }
+
+    /** 1文を音声ファイルにする（バックグラウンドで呼ぶ） */
+    private fun renderSegment(text: String, gen: Int, n: Int): java.io.File? {
+        if (useEleven()) {
+            val f = java.io.File(cacheDir, "seg_${gen % 4}_$n.mp3")
+            if (elevenTts(text, f)) return f
+        }
+        val t = tts ?: return null
+        if (!ttsReady) return null
+        val raw = java.io.File(cacheDir, "seg_${gen % 4}_$n.wav")
+        val id = "seg:$gen:$n"
+        val latch = java.util.concurrent.CountDownLatch(1)
+        segLatches[id] = latch
+        t.synthesizeToFile(text, null, raw, id)
+        if (!latch.await(15, java.util.concurrent.TimeUnit.SECONDS) || gen != replyGen) { segLatches.remove(id); return null }
+        if (voiceStyle() > 0) {
+            val fx = java.io.File(cacheDir, "seg_${gen % 4}_${n}_fx.wav")
+            if (VoiceFx.process(raw, fx, voiceStyle())) return fx
+        }
+        return raw
+    }
+
+    private fun playNextReply(gen: Int) {
+        if (gen != replyGen || replyPlayer != null) return
+        val f = readyAudio.poll() ?: return
+        try {
+            if (voiceStyle() > 0 && reverb == null) reverb = android.media.audiofx.PresetReverb(0, 0).apply {
+                preset = android.media.audiofx.PresetReverb.PRESET_LARGEROOM; enabled = true
+            }
+            val mp = android.media.MediaPlayer()
+            mp.setAudioAttributes(android.media.AudioAttributes.Builder().setUsage(android.media.AudioAttributes.USAGE_ASSISTANT)
+                .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH).build())
+            mp.setDataSource(f.path); mp.prepare()
+            if (voiceStyle() > 0) reverb?.let { mp.attachAuxEffect(it.id); mp.setAuxEffectSendLevel(if (useEleven()) 0.22f else 0.32f) }
+            mp.setOnCompletionListener {
+                it.release(); if (replyPlayer === it) replyPlayer = null
+                f.delete()
+                if (gen != replyGen) return@setOnCompletionListener
+                replyPending.decrementAndGet()
+                if (readyAudio.isNotEmpty()) playNextReply(gen) else checkReplyEnd(gen)
+            }
+            replyPlayer = mp
+            hud.speaking = true
+            mp.start()
+            if (sessionActive) bargeIn.start()
+        } catch (e: Exception) {
+            replyPlayer = null; replyPending.decrementAndGet(); f.delete()
+            if (readyAudio.isNotEmpty()) playNextReply(gen) else checkReplyEnd(gen)
+        }
+    }
+
+    private fun checkReplyEnd(gen: Int) {
+        if (gen != replyGen || !replyDone || replyPending.get() > 0 || replyPlayer != null) return
+        hud.speaking = false
+        bargeIn.stop()
+        replyGen++                     // 読み上げの係を終わらせる
+        onReplyFinished()
+    }
+
+    private fun onReplyFinished() {
+        if (endAfterReply) { endAfterReply = false; endSession(false); return }
+        onSpoken("assistant")
+    }
+
+    private fun stopReply() {
+        replyGen++
+        bargeIn.stop()
+        replyQueue.clear(); readyAudio.clear(); replyPending.set(0)
+        replyPlayer?.let { try { it.stop() } catch (e: Exception) { }; it.release() }
+        replyPlayer = null
     }
 
     private fun speakReply(text: String) {
@@ -2052,6 +2191,7 @@ ${memories().ifEmpty { listOf("（まだなし）") }.joinToString("\n") { "・$
     private fun runTool(name: String, input: JSONObject): String {
         fun ui(block: () -> Unit) = runOnUiThread(block)
         return when (name) {
+            "end_conversation" -> { endAfterReply = true; "OK。ひとことだけ挨拶して終える" }
             "open_app" -> {
                 val q = input.optString("name").lowercase().replace(" ", "")
                 val hit = apps.firstOrNull { it.label.lowercase().replace(" ", "") == q }

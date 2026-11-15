@@ -14,23 +14,31 @@ class ClaudeAgent(var apiKey: String, var model: String = "claude-haiku-5-5") {
     fun reset() { history = JSONArray() }
 
     /** 別スレッドから呼ぶこと */
-    fun ask(userText: String, system: String, tools: JSONArray, exec: (String, JSONObject) -> String): String {
+    fun ask(userText: String, system: String, tools: JSONArray, exec: (String, JSONObject) -> String): String =
+        askStream(userText, system, tools, exec) {}
+
+    /**
+     * 返事を少しずつ受け取り、1文できるたびに onSentence を呼ぶ（別スレッドから呼ぶこと）。
+     * 最初の1文が届いた時点で読み上げを始められるので、返事が早く聞こえる。
+     */
+    fun askStream(userText: String, system: String, tools: JSONArray, exec: (String, JSONObject) -> String, onSentence: (String) -> Unit): String {
         val now = System.currentTimeMillis()
-        if (now - lastAt > 5 * 60 * 1000 || history.length() > 24) reset()
+        if (now - lastAt > 15 * 60 * 1000 || history.length() > 30) reset()
         lastAt = now
         history.put(JSONObject().put("role", "user").put("content", userText))
+        val spoken = StringBuilder()
         try {
             repeat(5) {
                 val req = JSONObject()
                     .put("model", model)
-                    .put("max_tokens", 600)
+                    .put("max_tokens", 400)
+                    .put("stream", true)
                     .put("system", system)
                     .put("tools", tools)
                     .put("messages", history)
-                val res = post(req)
-                val content = res.getJSONArray("content")
+                val (content, stop) = stream(req) { s -> spoken.append(s); onSentence(s) }
                 history.put(JSONObject().put("role", "assistant").put("content", content))
-                if (res.optString("stop_reason") == "tool_use") {
+                if (stop == "tool_use") {
                     val results = JSONArray()
                     for (i in 0 until content.length()) {
                         val b = content.getJSONObject(i)
@@ -42,15 +50,10 @@ class ClaudeAgent(var apiKey: String, var model: String = "claude-haiku-5-5") {
                     }
                     history.put(JSONObject().put("role", "user").put("content", results))
                 } else {
-                    val sb = StringBuilder()
-                    for (i in 0 until content.length()) {
-                        val b = content.getJSONObject(i)
-                        if (b.optString("type") == "text") sb.append(b.getString("text"))
-                    }
-                    return sb.toString().trim().ifEmpty { "了解しました。" }
+                    return spoken.toString().trim().ifEmpty { "承知しました。".also(onSentence) }
                 }
             }
-            return "処理が長くなったので、いったん止めました。"
+            return "処理が長くなったので、いったん止めました。".also(onSentence)
         } catch (e: ApiError) {
             reset(); throw e
         } catch (e: Exception) {
@@ -58,10 +61,70 @@ class ClaudeAgent(var apiKey: String, var model: String = "claude-haiku-5-5") {
         }
     }
 
+    /** SSEで受け取り、ブロックを組み立てる。文の区切りごとに onSentence を呼ぶ */
+    private fun stream(body: JSONObject, onSentence: (String) -> Unit): Pair<JSONArray, String> {
+        val con = open(body)
+        val code = con.responseCode
+        if (code !in 200..299) fail(code, con.errorStream?.bufferedReader()?.readText() ?: "")
+        val blocks = ArrayList<JSONObject>()
+        val json = HashMap<Int, StringBuilder>()
+        val texts = HashMap<Int, StringBuilder>()
+        val pending = StringBuilder()
+        var stop = "end_turn"
+        fun flush(all: Boolean) {
+            while (true) {
+                val i = pending.indexOfFirst { it == '。' || it == '！' || it == '？' || it == '!' || it == '?' || it == '\n' }
+                if (i < 0) break
+                val sentence = pending.substring(0, i + 1).trim()
+                pending.delete(0, i + 1)
+                if (sentence.isNotEmpty()) onSentence(sentence)
+            }
+            if (all) { val rest = pending.toString().trim(); pending.setLength(0); if (rest.isNotEmpty()) onSentence(rest) }
+        }
+        con.inputStream.bufferedReader(Charsets.UTF_8).useLines { lines ->
+            for (line in lines) {
+                if (!line.startsWith("data:")) continue
+                val ev = try { JSONObject(line.substring(5).trim()) } catch (e: Exception) { continue }
+                when (ev.optString("type")) {
+                    "content_block_start" -> {
+                        val idx = ev.getInt("index"); val cb = ev.getJSONObject("content_block")
+                        while (blocks.size <= idx) blocks += JSONObject()
+                        blocks[idx] = cb
+                        if (cb.optString("type") == "text") texts[idx] = StringBuilder(cb.optString("text"))
+                        if (cb.has("input")) json[idx] = StringBuilder()
+                    }
+                    "content_block_delta" -> {
+                        val idx = ev.getInt("index"); val d = ev.getJSONObject("delta")
+                        when (d.optString("type")) {
+                            "text_delta" -> { val t = d.optString("text"); texts.getOrPut(idx) { StringBuilder() }.append(t); pending.append(t); flush(false) }
+                            "input_json_delta" -> json.getOrPut(idx) { StringBuilder() }.append(d.optString("partial_json"))
+                        }
+                    }
+                    "content_block_stop" -> flush(false)
+                    "message_delta" -> ev.optJSONObject("delta")?.optString("stop_reason")?.takeIf { it.isNotEmpty() && it != "null" }?.let { stop = it }
+                    "error" -> throw ApiError(ev.optJSONObject("error")?.optString("message") ?: "エラーが起きました")
+                }
+            }
+        }
+        flush(true)
+        val arr = JSONArray()
+        blocks.forEachIndexed { i, b ->
+            if (b.length() == 0) return@forEachIndexed
+            when (b.optString("type")) {
+                "text" -> { val t = texts[i]?.toString().orEmpty(); if (t.isNotEmpty()) arr.put(JSONObject().put("type", "text").put("text", t)) }
+                else -> {
+                    json[i]?.let { sb -> b.put("input", if (sb.isEmpty()) JSONObject() else try { JSONObject(sb.toString()) } catch (e: Exception) { JSONObject() }) }
+                    arr.put(b)
+                }
+            }
+        }
+        return arr to stop
+    }
+
     /** カメラ画像を見せて答えてもらう（会話履歴にも残すので、続けて質問できる） */
     fun vision(jpegB64: String, question: String, system: String): String {
         val now = System.currentTimeMillis()
-        if (now - lastAt > 5 * 60 * 1000 || history.length() > 24) reset()
+        if (now - lastAt > 15 * 60 * 1000 || history.length() > 30) reset()
         lastAt = now
         val content = JSONArray()
             .put(JSONObject().put("type", "image").put("source", JSONObject().put("type", "base64").put("media_type", "image/jpeg").put("data", jpegB64)))
@@ -85,7 +148,7 @@ class ClaudeAgent(var apiKey: String, var model: String = "claude-haiku-5-5") {
 
     class ApiError(msg: String) : Exception(msg)
 
-    private fun post(body: JSONObject): JSONObject {
+    private fun open(body: JSONObject): HttpURLConnection {
         val con = URL("https://api.anthropic.com/v1/messages").openConnection() as HttpURLConnection
         con.requestMethod = "POST"
         con.connectTimeout = 15000; con.readTimeout = 45000
@@ -94,17 +157,24 @@ class ClaudeAgent(var apiKey: String, var model: String = "claude-haiku-5-5") {
         con.setRequestProperty("x-api-key", apiKey)
         con.setRequestProperty("anthropic-version", "2023-06-01")
         con.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
+        return con
+    }
+
+    private fun fail(code: Int, text: String): Nothing {
+        val msg = try { JSONObject(text).getJSONObject("error").getString("message") } catch (e: Exception) { text.take(120) }
+        throw ApiError(when (code) {
+            401 -> "APIキーが正しくないようです"
+            429 -> "混み合っています。少し待ってからもう一度どうぞ"
+            529 -> "Claudeが混雑しています。少し待ってからどうぞ"
+            else -> "エラー $code：$msg"
+        })
+    }
+
+    private fun post(body: JSONObject): JSONObject {
+        val con = open(body)
         val code = con.responseCode
         val text = (if (code in 200..299) con.inputStream else con.errorStream)?.bufferedReader()?.readText() ?: ""
-        if (code !in 200..299) {
-            val msg = try { JSONObject(text).getJSONObject("error").getString("message") } catch (e: Exception) { text.take(120) }
-            throw ApiError(when (code) {
-                401 -> "APIキーが正しくないようです"
-                429 -> "混み合っています。少し待ってからもう一度どうぞ"
-                529 -> "Claudeが混雑しています。少し待ってからどうぞ"
-                else -> "エラー $code：$msg"
-            })
-        }
+        if (code !in 200..299) fail(code, text)
         return JSONObject(text)
     }
 
@@ -146,6 +216,8 @@ class ClaudeAgent(var apiKey: String, var model: String = "claude-haiku-5-5") {
                     JSONObject().put("text", str("タスクの内容（短く）")), listOf("text")))
                 .put(tool("complete_task", "TASKSパネルの未完了タスクのうち、キーワードに合うものを完了にする。",
                     JSONObject().put("keyword", str("完了にするタスクに含まれる言葉")), listOf("keyword")))
+                .put(tool("end_conversation", "相手が会話を終えたがっているとき（「ありがとう、もういいよ」「大丈夫」「またね」「おやすみ」など）に使う。短いひとことの返事を言ったあと、会話を閉じて待機に戻る。",
+                    JSONObject(), listOf()))
                 .put(tool("call_contact", "連絡先の相手に電話をかける。nameは連絡先の名前。",
                     JSONObject().put("name", str("相手の名前")), listOf("name")))
         }
