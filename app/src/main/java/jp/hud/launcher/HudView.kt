@@ -725,7 +725,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
 
         // panels: reveal from center (and retract in idle)
         val pb = ease((boot - 0.25f) / 0.75f) * (1f - ease(idleP))
-        val pa = if (expanded != null) 0f else pb
+        val pa = if (expanded != null || (lMode != 0 && !lClosing)) 0f else pb
         if (abs(pa - lastPanelsAlpha) > 0.02f || (pa == 1f && lastPanelsAlpha != 1f) || (pa == 0f && lastPanelsAlpha != 0f)) {
             lastPanelsAlpha = pa; listener?.onPanelsAlpha(pa)
         }
@@ -2561,8 +2561,8 @@ class HudView(context: Context) : View(context), SensorEventListener {
         }
     }
 
-    private fun carCenterY() = max(insetTop + unit * 3f + coreR * 0.4f, cy - coreR * 1.55f)
-    private fun carRx() = min(width * 0.36f, coreR * 1.75f)
+    private fun carCenterY() = max(insetTop + unit * 3f + coreR * 0.6f, cy - coreR * 1.8f)
+    private fun carRx() = min(width * 0.42f, coreR * 2.1f)
 
     private fun hitItem(x: Float, y: Float): Int {
         when (lMode) {
@@ -2823,7 +2823,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
             else { val snap = Math.round(carAng / step) * step; carAng += (snap - carAng) * 0.18f; carVel = 0f }
         }
         val ccx = cx; val ccy = carCenterY()
-        val rx = carRx() * (0.4f + 0.6f * ep); val ry = coreR * 0.3f * ep
+        val rx = carRx() * (0.4f + 0.6f * ep); val ry = coreR * 0.45f * ep
         // コアからの投影光
         val beam = Path().apply {
             moveTo(cx - coreR * 0.25f, cy - coreR * 0.6f); lineTo(ccx - rx * 1.05f, ccy); lineTo(ccx + rx * 1.05f, ccy); lineTo(cx + coreR * 0.25f, cy - coreR * 0.6f); close()
@@ -2841,7 +2841,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
         val geo = Array(n) { i ->
             val th = i * step + carAng + (1f - ep) * 1.4f
             val z = cos(th)
-            val k = 0.5f + 0.5f * (z + 1f) / 2f
+            val k = 0.38f + 0.62f * (z + 1f) / 2f
             floatArrayOf(ccx + rx * sin(th), ccy + ry * z, base * k * 2f, z)
         }
         carGeo = geo
@@ -2849,7 +2849,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
         for (i in 0 until n) if (geo[i][3] > geo[front][3]) front = i
         for (i in geo.indices.sortedBy { geo[it][3] }) {
             val g = geo[i]
-            val a = ep * (0.25f + 0.75f * (g[3] + 1f) / 2f)
+            val a = ep * (0.12f + 0.88f * ((g[3] + 1f) / 2f).pow(1.5f))
             val sel = i == front && abs(carVel) < 0.02f && !carDrag
             val r = g[2] / 2f
             val al = (255 * a).toInt()
