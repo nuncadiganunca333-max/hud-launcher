@@ -2476,6 +2476,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
     } catch (e: Exception) { null }
 
     private class LItem(val app: AppEntry?, val kind: Int, val name: String, val glyph: String) // 0=アプリ 1=SCAN 2=PAY 3=一覧 4=設定
+    private fun lKey(it: LItem) = it.app?.key ?: "#${it.kind}"
     private fun lItems(): List<LItem> {
         val extra = ArrayList<LItem>()
         extra += LItem(null, 1, "SCAN", "◎")
@@ -2507,7 +2508,12 @@ class HudView(context: Context) : View(context), SensorEventListener {
         lMode = mode; lOpenAt = System.currentTimeMillis(); lClosing = false
         lHold = hold; lFx = x; lFy = y; lDownX = x; lDownY = y; lLastX = x; lMoved = hold; lSel = -1
         carVel = 0f; carDrag = false; carTarget = Float.NaN
-        if (mode == 3) carAng = 0f
+        if (mode == 3) {
+            // 前回開いたものを正面から始める
+            val last = context.getSharedPreferences("hud", Context.MODE_PRIVATE).getString("lastLaunch", null)
+            val i = lList.indexOfFirst { lKey(it) == last }.coerceAtLeast(0)
+            carAng = -i * (2 * PI / lList.size).toFloat()
+        }
         layoutLauncher()
         SoundFx.play(SoundFx.Fx.OPEN)
         performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
@@ -2604,6 +2610,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
     private fun fire(i: Int) {
         val it = lList.getOrNull(i) ?: return
         val p = itemCenter(i)
+        context.getSharedPreferences("hud", Context.MODE_PRIVATE).edit().putString("lastLaunch", lKey(it)).apply()
         performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
         SoundFx.play(SoundFx.Fx.OPEN)
         closeLauncher()
