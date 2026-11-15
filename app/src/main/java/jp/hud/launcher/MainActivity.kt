@@ -106,7 +106,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
         rootView = root
         glBg = GLBackground(this)
         root.addView(glBg, FrameLayout.LayoutParams(-1, -1))
-        hud = HudView(this).also { it.listener = this; it.gl = glBg }
+        hud = HudView(this).also { it.listener = this; it.gl = glBg; it.iconOf = { a -> iconOf(a) } }
         root.addView(hud, FrameLayout.LayoutParams(-1, -1))
         moduleFrame = SwipeFrame(this)
         root.addView(moduleFrame, FrameLayout.LayoutParams(-1, -1))
@@ -262,6 +262,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
 
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
+        if (hud.closeLauncherIfOpen()) return
         if (assistant.isShowing) { onAssistantClose(); return }
         if (scan.isShowing) { onScanClose(); return }
         if (pay.isShowing) { pay.close(); return }
@@ -1573,7 +1574,7 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
                         }.show()
                     10 -> askAiName()
                     11 -> AlertDialog.Builder(this).setTitle("「${aiName()}」の呼びかけで起動")
-                        .setSingleChoiceItems(arrayOf("ホームを開いてから10秒間だけ", "10秒間＋充電中・ドライブ中は常に", "OFF（地球儀タップだけ）"), prefs.getInt("wakeMode2", 0)) { d, which ->
+                        .setSingleChoiceItems(arrayOf("ホームを開いてから10秒間だけ", "10秒間＋充電中・ドライブ中は常に", "OFF（ダブルタップだけ）"), prefs.getInt("wakeMode2", 0)) { d, which ->
                             prefs.edit().putInt("wakeMode2", which).apply(); updateTalkHint(); stopWake(); startWake(500); d.dismiss()
                         }.show()
                     12 -> pickCar()
@@ -1688,10 +1689,10 @@ class MainActivity : Activity(), HudView.Listener, AlertOverlay.Listener, Assist
         val left = ((wakeDeadline - System.currentTimeMillis()) / 1000).toInt()
         val always = m == 1 && (hud.stats.charging || drive.isShowing)
         hud.talkHint = when {
-            apiKey().isEmpty() || m == 2 || (silentMode() && !drive.isShowing) -> "TAP GLOBE TO TALK"
-            always -> "SAY \"${aiTag()}\"  /  TAP GLOBE"
+            apiKey().isEmpty() || m == 2 || (silentMode() && !drive.isShowing) -> "DOUBLE TAP TO TALK"
+            always -> "SAY \"${aiTag()}\"  /  DOUBLE TAP"
             left >= 0 && wakeActive -> "SAY \"${aiTag()}\""
-            else -> "TAP GLOBE TO TALK"
+            else -> "DOUBLE TAP TO TALK"
         }
     }
 

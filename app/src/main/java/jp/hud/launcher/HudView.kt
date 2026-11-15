@@ -135,7 +135,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
     var voiceLevel = 0f           // mic level while listening
     var spectrum: FloatArray? = null  // music FFT bands 0..1
     var idleTimeoutMs = 45000L
-    var talkHint = "TAP TO TALK"
+    var talkHint = "DOUBLE TAP TO TALK"
     var lowPower = false
     val lastTouchAt get() = lastTouch
     var moduleLinked = false
@@ -268,7 +268,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
         }
     })
 
-    private fun inCore(x: Float, y: Float) = hypot(x - cx - dX * 0.3f, y - cy - dY * 0.3f) < coreR * 0.72f
+    private fun inCore(x: Float, y: Float) = hypot(x - cx - dX * 0.3f, y - cy - dY * 0.3f) < coreR * 0.98f
     private var coreTouchAt = 0L
 
     private val gestures = GestureDetector(context, object : GestureDetector.SimpleOnGestureListener() {
@@ -283,6 +283,10 @@ class HudView(context: Context) : View(context), SensorEventListener {
         }
         override fun onScroll(e1: MotionEvent?, e2: MotionEvent, dx: Float, dy: Float): Boolean {
             if (!downInCore) return false
+            if (e1 != null && lMode == 0) {
+                val up = e1.y - e2.y
+                if (up > coreR * 0.45f && up > abs(e2.x - e1.x) * 1.4f) { dragging = false; openLauncher(2, e2.x, e2.y, true); return true }
+            }
             dragging = true
             val k = 1f / (coreR * 0.42f)
             globeAY -= dx * k; globeAX = (globeAX - dy * k).coerceIn(-1.2f, 1.2f)
@@ -290,7 +294,12 @@ class HudView(context: Context) : View(context), SensorEventListener {
             invalidate(); return true
         }
 
-        override fun onSingleTapUp(e: MotionEvent): Boolean { tap(e.x, e.y); return true }
+        override fun onSingleTapUp(e: MotionEvent): Boolean { if (!inCore(e.x, e.y)) tap(e.x, e.y); return true }
+        override fun onSingleTapConfirmed(e: MotionEvent): Boolean { if (inCore(e.x, e.y) && lMode == 0) openLauncher(3, e.x, e.y, false); return true }
+        override fun onDoubleTap(e: MotionEvent): Boolean {
+            if (inCore(e.x, e.y)) { SoundFx.play(SoundFx.Fx.LISTEN); listener?.onClockTap() } else tap(e.x, e.y)
+            return true
+        }
         override fun onLongPress(e: MotionEvent) { longPress(e.x, e.y) }
         override fun onFling(e1: MotionEvent?, e2: MotionEvent, vx: Float, vy: Float): Boolean {
             if (downInCore) {
@@ -336,7 +345,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
         invalidate()
     }
 
-    fun stop() { running = false; lastStopAt = System.currentTimeMillis(); sensors.unregisterListener(this) }
+    fun stop() { running = false; lMode = 0; lClosing = false; lastStopAt = System.currentTimeMillis(); sensors.unregisterListener(this) }
 
     override fun onSensorChanged(e: SensorEvent) {
         gx = e.values[0] / 9.81f; gy = e.values[1] / 9.81f
@@ -777,6 +786,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
         drawSwipeFx(c, nowMs)
         drawExpanded(c, t, now, nowMs)
         drawCoreTouch(c, nowMs)
+        drawLauncher(c, nowMs, t)
         drawFlash(c)
         val sy = ((t * 0.1f) % 1f) * height
         fill.color = Color.WHITE; fill.shader = LinearGradient(0f, sy - unit * 2, 0f, sy, Color.TRANSPARENT, cyan(22), Shader.TileMode.CLAMP)
@@ -1586,21 +1596,6 @@ class HudView(context: Context) : View(context), SensorEventListener {
     }
 
     // ---------- core / radial launcher ----------
-    private class Seg(val app: AppEntry?, val isApps: Boolean, val isScan: Boolean = false, val isPay: Boolean = false)
-
-    private fun segments(): List<Seg> {
-        val list = ArrayList<Seg>()
-        dock.take(10).forEach { list += Seg(it, false) }
-        list += Seg(null, false, true)
-        if (payEnabled) list += Seg(null, false, false, true)
-        list += Seg(null, true)
-        while (list.size < 6) list.add(list.size - 2, Seg(null, false))
-        return list
-    }
-
-    private val segR1 get() = coreR * 0.78f
-    private val segR2 get() = coreR
-
     private fun ticks(c: Canvas, r: Float, n: Int, len: Float, col: Int) {
         stroke.color = col; stroke.strokeWidth = 2f
         for (k in 0 until n) {
@@ -1643,42 +1638,6 @@ class HudView(context: Context) : View(context), SensorEventListener {
         stroke.strokeWidth = 3f; stroke.color = cyan(200)
         c.drawLine(cx + coreR * 0.655f, cy, cx + coreR * 0.775f, cy, stroke)
         c.restore()
-
-        c.restore()
-        // segments
-        c.save(); c.translate(dX * 0.3f, dY * 0.3f)
-        val segs = segments()
-        val n = segs.size; val sw = 360f / n; val start = -90f - sw / 2
-        val r1 = segR1; val r2 = segR2
-        val outer = RectF(cx - r2, cy - r2, cx + r2, cy + r2)
-        val inner = RectF(cx - r1, cy - r1, cx + r1, cy + r1)
-        val mid = (r1 + r2) / 2; val midRect = RectF(cx - mid, cy - mid, cx + mid, cy + mid)
-        val hl = (t * 0.5f) % n
-        for ((i, sg) in segs.withIndex()) {
-            val a0 = start + i * sw + 1.2f; val sweep = sw - 2.4f
-            val p = Path()
-            p.arcTo(outer, a0, sweep, true); p.arcTo(inner, a0 + sweep, -sweep); p.close()
-            val near = 1f - min(1f, abs(hl - i).let { min(it, n - it) })
-            val active = sg.app != null || sg.isApps || sg.isScan || sg.isPay
-            fill.color = Color.WHITE; fill.shader = RadialGradient(cx, cy, r2, intArrayOf(cyan(0), cyan(if (sg.isApps) 70 else if (active) 35 else 10), cyan(if (sg.isApps) 120 else if (active) (55 + 60 * near).toInt() else 18)),
-                floatArrayOf(0f, r1 / r2, 1f), Shader.TileMode.CLAMP)
-            c.drawPath(p, fill); fill.shader = null
-            if (active) { glow.strokeWidth = 6f; glow.color = cyan((60 + 80 * near).toInt()); c.drawPath(p, glow) }
-            stroke.strokeWidth = 2f; stroke.color = cyan(if (active) 200 else 70); c.drawPath(p, stroke)
-            val text = when { sg.isApps -> "APPS"; sg.isScan -> "◎ SCAN"; sg.isPay -> "¥ PAY"; sg.app != null -> sg.app.label.uppercase(); else -> "+" }
-            label.textSize = (r2 - r1) * (if (active) (if (n > 8) 0.25f else 0.30f) else 0.4f); label.textAlign = Paint.Align.LEFT; label.letterSpacing = 0.08f
-            label.color = if (active) CYAN else cyan(70)
-            val center = (a0 + sweep / 2 + 360f) % 360f
-            val bottomHalf = center in 0f..180f
-            val arcLen = (Math.toRadians(sweep.toDouble()) * mid).toFloat()
-            var shown = text
-            while (label.measureText(shown) > arcLen * 0.84f && shown.length > 1) shown = shown.dropLast(1)
-            if (shown != text) shown = shown.dropLast(1) + "…"
-            val tp = Path()
-            if (bottomHalf) tp.addArc(midRect, a0 + sweep, -sweep) else tp.addArc(midRect, a0, sweep)
-            c.drawTextOnPath(shown, tp, (arcLen - label.measureText(shown)) / 2, label.textSize * 0.36f, label)
-            label.letterSpacing = 0f
-        }
 
         c.restore()
         // rotating outer accents
@@ -2450,6 +2409,7 @@ class HudView(context: Context) : View(context), SensorEventListener {
         if (e.actionMasked == MotionEvent.ACTION_UP || e.actionMasked == MotionEvent.ACTION_CANCEL) dragging = false
         val wasIdle = idleP > 0.3f
         if (e.action == MotionEvent.ACTION_DOWN) { lastTouch = System.currentTimeMillis(); listener?.onUserActivity(); invalidate() }
+        if (lMode != 0) return launcherTouch(e)
         if (wasIdle) {
             if (e.action == MotionEvent.ACTION_UP) { SoundFx.play(SoundFx.Fx.TAP); bootStart = System.currentTimeMillis() - 300 }
             return true
@@ -2467,33 +2427,9 @@ class HudView(context: Context) : View(context), SensorEventListener {
         return gestures.onTouchEvent(e)
     }
 
-    private fun segmentAt(x0: Float, y0: Float): Seg? {
-        val x = x0 - dX * 0.8f; val y = y0 - dY * 0.8f
-        val d = hypot(x - cx, y - cy)
-        if (d < segR1 || d > segR2 * 1.05f) return null
-        val segs = segments(); val n = segs.size; val sw = 360f / n
-        var ang = Math.toDegrees(atan2((y - cy).toDouble(), (x - cx).toDouble())).toFloat()
-        ang = (ang - (-90f - sw / 2) + 720f) % 360f
-        return segs[(ang / sw).toInt().coerceIn(0, n - 1)]
-    }
-
     private fun tap(x: Float, y: Float) {
         if (appsBtn.contains(x, y) || (y > appsBtn.top - unit * 0.2f && abs(x - width / 2f) < unit * 4.5f)) { SoundFx.play(SoundFx.Fx.OPEN); listener?.onOpenDrawer(); return }
         if (y < topStrip.bottom + unit * 0.5f && x < width * 0.5f) { SoundFx.play(SoundFx.Fx.TAP); listener?.onTopStripTap(); return }
-        segmentAt(x, y)?.let { s ->
-            when {
-                s.isScan -> { SoundFx.play(SoundFx.Fx.OPEN); listener?.onScan() }
-                s.isPay -> { SoundFx.play(SoundFx.Fx.OPEN); listener?.onPay() }
-                s.isApps || s.app == null -> { SoundFx.play(SoundFx.Fx.OPEN); listener?.onOpenDrawer() }
-                else -> {
-                    SoundFx.play(SoundFx.Fx.OPEN)
-                    val src = Rect((x - unit * 2).toInt(), (y - unit * 2).toInt(), (x + unit * 2).toInt(), (y + unit * 2).toInt())
-                    flashLaunch(src, s.app.label)
-                    listener?.onLaunch(s.app, src)
-                }
-            }
-            return
-        }
         panels["MODULE"]?.let {
             if (it.contains(x, y)) {
                 if (moduleMediaPage && mediaInModule) {
@@ -2511,7 +2447,6 @@ class HudView(context: Context) : View(context), SensorEventListener {
             if (mediaArt.contains(x, y)) { listener?.onMediaAction("open"); return }
             return
         }
-        if (inCore(x, y)) { SoundFx.play(SoundFx.Fx.LISTEN); listener?.onClockTap(); return }
         for ((name, r) in panels) if (r.contains(x, y)) {
             if (name == "MODULE") return
             if (name == "CALENDAR" && calendarLinked) { SoundFx.play(SoundFx.Fx.OPEN); listener?.onPanelTap(name); return }
@@ -2522,10 +2457,417 @@ class HudView(context: Context) : View(context), SensorEventListener {
     }
 
     private fun longPress(x: Float, y: Float) {
-        segmentAt(x, y)?.app?.let { SoundFx.play(SoundFx.Fx.DONE); listener?.onDockLongPress(it); return }
         panels["MODULE"]?.let { if (it.contains(x, y)) { listener?.onModuleEdit(); return } }
         panels["CALENDAR"]?.let { if (it.contains(x, y)) { SoundFx.play(SoundFx.Fx.TAP); listener?.onCalendarEdit(); return } }
-        if (inCore(x, y)) { SoundFx.play(SoundFx.Fx.TAP); listener?.onCoreLongPress(); return }
+        if (inCore(x, y)) { openLauncher(1, x, y, true); return }
         if (y < topStrip.bottom + unit) listener?.onHomeSettings()
+    }
+
+    // ======================= アプリ展開（長押し：放射 / 上スワイプ：扇 / タップ：カルーセル） =======================
+    var iconOf: ((AppEntry) -> android.graphics.drawable.Drawable?)? = null
+    private val iconBmp = HashMap<String, Bitmap>()
+    private fun bmpOf(a: AppEntry): Bitmap? = iconBmp[a.key] ?: try {
+        iconOf?.invoke(a)?.let { d ->
+            val s = 160
+            val b = Bitmap.createBitmap(s, s, Bitmap.Config.ARGB_8888)
+            val old = Rect(d.bounds); d.setBounds(0, 0, s, s); d.draw(Canvas(b)); d.bounds = old
+            iconBmp[a.key] = b; b
+        }
+    } catch (e: Exception) { null }
+
+    private class LItem(val app: AppEntry?, val kind: Int, val name: String, val glyph: String) // 0=アプリ 1=SCAN 2=PAY 3=一覧 4=設定
+    private fun lItems(): List<LItem> {
+        val extra = ArrayList<LItem>()
+        extra += LItem(null, 1, "SCAN", "◎")
+        if (payEnabled) extra += LItem(null, 2, "PAY", "¥")
+        extra += LItem(null, 3, "ALL", "▦")
+        extra += LItem(null, 4, "SET", "⚙")
+        val apps = dock.take(12 - extra.size).map { LItem(it, 0, it.label, "") }
+        return apps + extra
+    }
+
+    private var lMode = 0                 // 0=閉 1=放射 2=扇 3=カルーセル
+    private var lOpenAt = 0L
+    private var lClosing = false
+    private var lCloseAt = 0L
+    private var lHold = false
+    private var lFx = 0f; private var lFy = 0f
+    private var lSel = -1
+    private var lList: List<LItem> = emptyList()
+    private var lGeo: Array<FloatArray> = emptyArray()   // 放射: x,y,r / 扇: x,y,r, r1,r2,a0,sweep
+    private var lDownX = 0f; private var lDownY = 0f; private var lLastX = 0f; private var lMoved = false
+    private var carAng = 0f; private var carVel = 0f; private var carDrag = false; private var carTarget = Float.NaN
+    private var carGeo: Array<FloatArray> = emptyArray() // x,y,size,z
+    private val lText = android.text.TextPaint(Paint.ANTI_ALIAS_FLAG).apply { textAlign = Paint.Align.CENTER }
+    val launcherOpen get() = lMode != 0 && !lClosing
+    fun closeLauncherIfOpen(): Boolean { if (!launcherOpen) return false; closeLauncher(); return true }
+
+    private fun openLauncher(mode: Int, x: Float, y: Float, hold: Boolean) {
+        lList = lItems(); if (lList.isEmpty()) return
+        lMode = mode; lOpenAt = System.currentTimeMillis(); lClosing = false
+        lHold = hold; lFx = x; lFy = y; lDownX = x; lDownY = y; lLastX = x; lMoved = hold; lSel = -1
+        carVel = 0f; carDrag = false; carTarget = Float.NaN
+        if (mode == 3) carAng = 0f
+        layoutLauncher()
+        SoundFx.play(SoundFx.Fx.OPEN)
+        performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
+        // ジェスチャー検出の途中状態を捨てる
+        post { gestures.onTouchEvent(MotionEvent.obtain(0L, 0L, MotionEvent.ACTION_CANCEL, 0f, 0f, 0)) }
+        invalidate()
+    }
+
+    private fun closeLauncher() {
+        if (lMode == 0 || lClosing) return
+        lClosing = true; lCloseAt = System.currentTimeMillis(); lHold = false; invalidate()
+    }
+
+    private fun layoutLauncher() {
+        val n = lList.size
+        val m = unit * 0.4f
+        val top = insetTop + unit * 1.2f
+        val bottom = height - insetBottom - unit * 0.6f
+        if (lMode == 1) {
+            // コアの上半分を囲む弧
+            val span = if (n > 8) 240f else 210f
+            val R = min(coreR * 1.6f, min(width / 2f - m, cy - top) * 0.92f).coerceAtLeast(coreR * 1.25f)
+            val step = if (n > 1) span / (n - 1) else 0f
+            val nr = min(Math.toRadians(step.toDouble()).toFloat() * R * 0.36f, coreR * 0.24f).coerceAtLeast(unit * 0.9f)
+            lGeo = Array(n) { i ->
+                val a = Math.toRadians((-90f - span / 2 + i * step).toDouble())
+                var x = cx + R * cos(a).toFloat(); var y = cy + R * sin(a).toFloat()
+                x = x.coerceIn(nr + m, width - nr - m); y = y.coerceIn(top + nr, bottom - nr * 2f)
+                floatArrayOf(x, y, nr)
+            }
+        } else if (lMode == 2) {
+            // 2段の扇
+            val half = 64f
+            val rOut = min(coreR * 2.25f, min((width / 2f - m) / sin(Math.toRadians(half.toDouble())).toFloat(), cy - top)).coerceAtLeast(coreR * 1.7f)
+            val r0 = coreR * 1.06f
+            val rMid = r0 + (rOut - r0) * 0.5f
+            val nIn = n / 2; val nOut = n - nIn
+            val gap = 1.6f
+            lGeo = Array(n) { i ->
+                val inner = i < nIn
+                val k = if (inner) i else i - nIn
+                val cnt = if (inner) nIn else nOut
+                val r1 = if (inner) r0 else rMid + unit * 0.12f
+                val r2 = if (inner) rMid - unit * 0.12f else rOut
+                val sw = half * 2 / cnt
+                val a0 = -90f - half + k * sw + gap / 2
+                val am = Math.toRadians((a0 + (sw - gap) / 2).toDouble())
+                val rm = (r1 + r2) / 2
+                floatArrayOf(cx + rm * cos(am).toFloat(), cy + rm * sin(am).toFloat(), (r2 - r1) * 0.5f, r1, r2, a0, sw - gap)
+            }
+        }
+    }
+
+    private fun carCenterY() = max(insetTop + unit * 3f + coreR * 0.4f, cy - coreR * 1.55f)
+    private fun carRx() = min(width * 0.36f, coreR * 1.75f)
+
+    private fun hitItem(x: Float, y: Float): Int {
+        when (lMode) {
+            1 -> {
+                if (hypot(x - cx, y - cy) < coreR * 0.6f) return -1
+                var best = -1; var bd = Float.MAX_VALUE
+                for ((i, g) in lGeo.withIndex()) { val d = hypot(x - g[0], y - g[1]); if (d < bd) { bd = d; best = i } }
+                return if (best >= 0 && bd < lGeo[best][2] * 2.2f) best else -1
+            }
+            2 -> {
+                val d = hypot(x - cx, y - cy)
+                var ang = Math.toDegrees(atan2((y - cy).toDouble(), (x - cx).toDouble())).toFloat()
+                for ((i, g) in lGeo.withIndex()) {
+                    if (d < g[3] - unit * 0.1f || d > g[4] + unit * 0.1f) continue
+                    val rel = ((ang - g[5]) % 360f + 360f) % 360f
+                    if (rel <= g[6] + 1.6f) return i
+                }
+                return -1
+            }
+            3 -> {
+                val order = carGeo.indices.sortedByDescending { carGeo[it][3] }
+                for (i in order) { val g = carGeo[i]; if (hypot(x - g[0], y - g[1]) < g[2] * 0.75f) return i }
+                return -1
+            }
+        }
+        return -1
+    }
+
+    private fun updateSel(x: Float, y: Float) {
+        val i = hitItem(x, y)
+        if (i != lSel) { lSel = i; if (i >= 0) performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK) }
+    }
+
+    private fun itemCenter(i: Int): PointF = when (lMode) {
+        3 -> carGeo.getOrNull(i)?.let { PointF(it[0], it[1]) } ?: PointF(cx, cy)
+        else -> lGeo.getOrNull(i)?.let { PointF(it[0], it[1]) } ?: PointF(cx, cy)
+    }
+
+    private fun fire(i: Int) {
+        val it = lList.getOrNull(i) ?: return
+        val p = itemCenter(i)
+        performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
+        SoundFx.play(SoundFx.Fx.OPEN)
+        closeLauncher()
+        when (it.kind) {
+            0 -> {
+                val app = it.app ?: return
+                val src = Rect((p.x - unit * 2).toInt(), (p.y - unit * 2).toInt(), (p.x + unit * 2).toInt(), (p.y + unit * 2).toInt())
+                flashLaunch(src, app.label); listener?.onLaunch(app, src)
+            }
+            1 -> listener?.onScan()
+            2 -> listener?.onPay()
+            3 -> listener?.onOpenDrawer()
+            4 -> listener?.onCoreLongPress()
+        }
+    }
+
+    private fun carTap(x: Float, y: Float) {
+        val i = hitItem(x, y)
+        if (i >= 0) {
+            val g = carGeo[i]
+            if (g[3] > 0.97f) { fire(i); return }
+            val step = (2 * PI / lList.size).toFloat()
+            var th = (i * step + carAng) % (2 * PI).toFloat()
+            if (th > PI) th -= (2 * PI).toFloat(); if (th < -PI) th += (2 * PI).toFloat()
+            carTarget = carAng - th; carVel = 0f
+            performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK)
+            return
+        }
+        val rx = carRx(); val ccy = carCenterY()
+        if (abs(x - cx) < rx + coreR * 0.3f && abs(y - ccy) < coreR * 0.75f) return
+        SoundFx.play(SoundFx.Fx.BACK); closeLauncher()
+    }
+
+    private fun launcherTouch(e: MotionEvent): Boolean {
+        lastTouch = System.currentTimeMillis()
+        if (lClosing) return true
+        val x = e.x; val y = e.y
+        when (e.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                lDownX = x; lDownY = y; lLastX = x; lMoved = false; lFx = x; lFy = y
+                if (lMode == 3) { carDrag = true; carVel = 0f; carTarget = Float.NaN }
+                else updateSel(x, y)
+            }
+            MotionEvent.ACTION_MOVE -> {
+                if (hypot(x - lDownX, y - lDownY) > unit * 0.6f) lMoved = true
+                lFx = x; lFy = y
+                if (lMode == 3 && carDrag) { val d = (x - lLastX) / carRx(); carAng += d; carVel = d; lLastX = x }
+                else updateSel(x, y)
+            }
+            MotionEvent.ACTION_UP -> {
+                if (lMode == 3) { carDrag = false; if (!lMoved) carTap(x, y) }
+                else if (lHold && lMode == 2) { lHold = false; lSel = -1 }       // 上スワイプで開いたときは、離しても起動しない
+                else {
+                    lHold = false
+                    val i = hitItem(x, y)
+                    if (i >= 0 && (lMode == 1 || !lMoved || i == lSel)) fire(i)
+                    else if (lMode == 1 || !lMoved) { SoundFx.play(SoundFx.Fx.BACK); closeLauncher() }
+                    lSel = -1
+                }
+            }
+            MotionEvent.ACTION_CANCEL -> { carDrag = false; if (lHold && lMode == 1) closeLauncher(); lHold = false; lSel = -1 }
+        }
+        invalidate()
+        return true
+    }
+
+    private fun easeBack(x: Float): Float { val c1 = 1.70158f; val c3 = c1 + 1; val q = x.coerceIn(0f, 1f) - 1; return 1 + c3 * q * q * q + c1 * q * q }
+
+    private fun hexPath(x: Float, y: Float, r: Float, rot: Float): Path {
+        val p = Path()
+        for (k in 0 until 6) {
+            val a = Math.toRadians((rot + k * 60f).toDouble())
+            val px = x + r * cos(a).toFloat(); val py = y + r * sin(a).toFloat()
+            if (k == 0) p.moveTo(px, py) else p.lineTo(px, py)
+        }
+        p.close(); return p
+    }
+
+    private fun drawGlyphOrIcon(c: Canvas, it: LItem, x: Float, y: Float, s: Float, alpha: Int) {
+        val b = it.app?.let { a -> bmpOf(a) }
+        if (b != null) {
+            layerPaint.alpha = alpha; layerPaint.isFilterBitmap = true
+            c.drawBitmap(b, null, RectF(x - s, y - s, x + s, y + s), layerPaint); layerPaint.alpha = 255
+        } else {
+            lText.typeface = Typeface.DEFAULT; lText.textSize = s * (if (it.app != null) 1.1f else 1.3f); lText.color = withA(CYAN, alpha)
+            val g = if (it.app != null) it.name.take(1) else it.glyph
+            c.drawText(g, x, y + lText.textSize * 0.36f, lText)
+        }
+    }
+
+    private fun drawLabel(c: Canvas, text: String, x: Float, y: Float, size: Float, maxW: Float, sel: Boolean, alpha: Int) {
+        lText.textSize = size; lText.typeface = if (sel) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+        lText.color = if (sel) withA(Color.WHITE, alpha) else withA(CYAN, (alpha * 0.85f).toInt())
+        val s = android.text.TextUtils.ellipsize(text, lText, maxW, android.text.TextUtils.TruncateAt.END).toString()
+        if (sel) { lText.setShadowLayer(size * 0.5f, 0f, 0f, CYAN) }
+        c.drawText(s, x, y, lText)
+        lText.clearShadowLayer()
+    }
+
+    /** 六角ノード（アイコン＋名前） */
+    private fun drawNode(c: Canvas, it: LItem, x: Float, y: Float, r: Float, sel: Boolean, a: Float, t: Float, labelW: Float) {
+        val al = (255 * a).toInt().coerceIn(0, 255)
+        if (al <= 2) return
+        val rr = if (sel) r * 1.22f else r
+        val hex = hexPath(x, y, rr, 30f)
+        fill.shader = null; fill.color = Color.argb((215 * a).toInt(), 2, 16, 28); c.drawPath(hex, fill)
+        if (sel) { glow.strokeWidth = rr * 0.22f; glow.color = withA(CYAN, (170 * a).toInt()); c.drawPath(hex, glow) }
+        stroke.strokeWidth = if (sel) 3.5f else 2f; stroke.color = withA(CYAN, ((if (sel) 255 else 170) * a).toInt()); c.drawPath(hex, stroke)
+        if (sel) {
+            c.save(); c.rotate(t * 90f, x, y)
+            stroke.strokeWidth = 2f; stroke.color = withA(Color.WHITE, (200 * a).toInt())
+            for (k in 0 until 3) c.drawArc(x - rr * 1.25f, y - rr * 1.25f, x + rr * 1.25f, y + rr * 1.25f, k * 120f, 50f, false, stroke)
+            c.restore()
+        }
+        drawGlyphOrIcon(c, it, x, y, rr * 0.56f, al)
+        drawLabel(c, it.name, x, y + rr + max(unit * 0.5f, r * 0.42f) * 1.05f, max(unit * 0.42f, r * 0.36f), labelW, sel, al)
+    }
+
+    private fun drawLauncher(c: Canvas, nowMs: Long, t: Float) {
+        if (lMode == 0) return
+        val p = if (lClosing) 1f - ((nowMs - lCloseAt) / 200f).coerceIn(0f, 1f) else ((nowMs - lOpenAt) / 380f).coerceIn(0f, 1f)
+        if (lClosing && p <= 0f) { lMode = 0; lClosing = false; invalidate(); return }
+        val ep = ease(p)
+        // 周りを暗くして、コアのまわりだけ残す
+        fill.color = Color.WHITE
+        fill.shader = RadialGradient(cx, cy, max(width, height) * 0.85f,
+            intArrayOf(Color.argb((60 * ep).toInt(), 0, 10, 20), Color.argb((225 * ep).toInt(), 0, 3, 8)), floatArrayOf(0.1f, 0.6f), Shader.TileMode.CLAMP)
+        c.drawRect(0f, 0f, width.toFloat(), height.toFloat(), fill); fill.shader = null
+        when (lMode) {
+            1 -> drawRadial(c, nowMs, t, p)
+            2 -> drawFan(c, nowMs, t, p)
+            3 -> drawCarousel(c, t, p)
+        }
+        postInvalidateOnAnimation()
+    }
+
+    private fun drawRadial(c: Canvas, nowMs: Long, t: Float, p: Float) {
+        val ep = ease(p)
+        // 発光リング
+        stroke.strokeWidth = 2f; stroke.color = cyan((120 * ep).toInt())
+        c.drawCircle(cx, cy, coreR * (0.7f + 0.35f * ep), stroke)
+        c.save(); c.rotate(t * 30f, cx, cy)
+        dash.strokeWidth = 3f; dash.color = cyan((150 * ep).toInt()); c.drawCircle(cx, cy, coreR * 1.12f * ep, dash)
+        c.restore()
+        val lw = if (lGeo.size > 1) hypot(lGeo[0][0] - lGeo[1][0], lGeo[0][1] - lGeo[1][1]) * 1.05f else coreR
+        for ((i, g) in lGeo.withIndex()) {
+            val q = if (lClosing) ep else easeBack(((nowMs - lOpenAt - i * 22) / 300f))
+            val x = cx + (g[0] - cx) * q; val y = cy + (g[1] - cy) * q
+            val sel = i == lSel
+            // コアからの光の線
+            val dx = x - cx; val dy = y - cy; val d = hypot(dx, dy).coerceAtLeast(1f)
+            val sx = cx + dx / d * coreR * 0.75f; val sy = cy + dy / d * coreR * 0.75f
+            val ex = x - dx / d * g[2]; val ey = y - dy / d * g[2]
+            if (d > coreR * 0.8f) {
+                stroke.strokeWidth = if (sel) 3f else 1.5f; stroke.color = withA(if (sel) Color.WHITE else CYAN, ((if (sel) 230 else 80) * ep).toInt())
+                c.drawLine(sx, sy, ex, ey, stroke)
+                if (sel) { glow.strokeWidth = 10f; glow.color = cyan((120 * ep).toInt()); c.drawLine(sx, sy, ex, ey, glow) }
+                val f = ((t * 0.9f + i * 0.17f) % 1f)
+                fill.color = cyan((200 * ep).toInt()); c.drawCircle(sx + (ex - sx) * f, sy + (ey - sy) * f, 3.5f, fill)
+            }
+            drawNode(c, lList[i], x, y, g[2] * q.coerceIn(0.3f, 1.1f), sel, ep, t, lw)
+        }
+        if (lHold) {
+            glow.strokeWidth = 8f; glow.color = cyan(90); c.drawLine(cx, cy, lFx, lFy, glow)
+            stroke.strokeWidth = 2f; stroke.color = cyan(220); c.drawLine(cx, cy, lFx, lFy, stroke)
+            stroke.color = cyan(200); c.drawCircle(lFx, lFy, unit * 0.9f, stroke)
+            fill.color = cyan(70); c.drawCircle(lFx, lFy, unit * 0.9f, fill)
+        }
+    }
+
+    private fun drawFan(c: Canvas, nowMs: Long, t: Float, p: Float) {
+        val ep = ease(p)
+        val nIn = lList.size / 2
+        for ((i, g) in lGeo.withIndex()) {
+            val delay = if (i < nIn) i * 18 else 120 + (i - nIn) * 18
+            val q = if (lClosing) ep else ease(((nowMs - lOpenAt - delay) / 280f))
+            if (q <= 0.01f) continue
+            val sel = i == lSel
+            val r1 = coreR + (g[3] - coreR) * q; val r2 = coreR + (g[4] - coreR) * q
+            val mid = g[5] + g[6] / 2; val sw = g[6] * (0.3f + 0.7f * q); val a0 = mid - sw / 2
+            val path = Path()
+            path.arcTo(RectF(cx - r2, cy - r2, cx + r2, cy + r2), a0, sw, true)
+            path.arcTo(RectF(cx - r1, cy - r1, cx + r1, cy + r1), a0 + sw, -sw); path.close()
+            fill.color = Color.WHITE
+            fill.shader = RadialGradient(cx, cy, max(r2, 1f), intArrayOf(cyan(0), cyan(((if (sel) 70 else 18) * q).toInt()), cyan(((if (sel) 150 else 60) * q).toInt())),
+                floatArrayOf(0f, (r1 / r2).coerceIn(0.01f, 0.99f), 1f), Shader.TileMode.CLAMP)
+            c.drawPath(path, fill); fill.shader = null
+            fill.color = Color.argb((150 * q).toInt(), 2, 14, 24); c.drawPath(path, fill)
+            if (sel) { glow.strokeWidth = 12f; glow.color = cyan((150 * q).toInt()); c.drawPath(path, glow) }
+            stroke.strokeWidth = if (sel) 3.5f else 2f; stroke.color = withA(if (sel) Color.WHITE else CYAN, ((if (sel) 255 else 170) * q).toInt()); c.drawPath(path, stroke)
+            // 外周の目盛り
+            stroke.strokeWidth = 4f; stroke.color = cyan((220 * q).toInt())
+            c.drawArc(RectF(cx - r2, cy - r2, cx + r2, cy + r2), a0 + sw * 0.3f, sw * 0.4f, false, stroke)
+            val am = Math.toRadians(mid.toDouble())
+            val rm = (r1 + r2) / 2
+            val band = r2 - r1
+            val arcLen = (Math.toRadians(sw.toDouble()) * rm).toFloat()
+            val s = min(band * 0.26f, arcLen * 0.22f)
+            val x = cx + rm * cos(am).toFloat(); val y = cy + rm * sin(am).toFloat() - band * 0.1f
+            val al = (255 * q).toInt()
+            drawGlyphOrIcon(c, lList[i], x, y, if (sel) s * 1.15f else s, al)
+            drawLabel(c, lList[i].name, x, y + s + band * 0.2f, max(unit * 0.4f, band * 0.15f), arcLen * 0.86f, sel, al)
+        }
+        // コア上の光点
+        fill.color = cyan((160 * ep).toInt()); c.drawCircle(cx, cy - coreR * 1.02f, 5f, fill)
+    }
+
+    private fun drawCarousel(c: Canvas, t: Float, p: Float) {
+        val ep = ease(p)
+        val n = lList.size
+        val step = (2 * PI / n).toFloat()
+        if (!carDrag) {
+            if (!carTarget.isNaN()) {
+                carAng += (carTarget - carAng) * 0.2f
+                if (abs(carTarget - carAng) < 0.002f) { carAng = carTarget; carTarget = Float.NaN }
+            } else if (abs(carVel) > 0.003f) { carAng += carVel; carVel *= 0.93f }
+            else { val snap = Math.round(carAng / step) * step; carAng += (snap - carAng) * 0.18f; carVel = 0f }
+        }
+        val ccx = cx; val ccy = carCenterY()
+        val rx = carRx() * (0.4f + 0.6f * ep); val ry = coreR * 0.3f * ep
+        // コアからの投影光
+        val beam = Path().apply {
+            moveTo(cx - coreR * 0.25f, cy - coreR * 0.6f); lineTo(ccx - rx * 1.05f, ccy); lineTo(ccx + rx * 1.05f, ccy); lineTo(cx + coreR * 0.25f, cy - coreR * 0.6f); close()
+        }
+        fill.color = Color.WHITE
+        fill.shader = LinearGradient(0f, cy - coreR * 0.6f, 0f, ccy, cyan((70 * ep).toInt()), cyan(0), Shader.TileMode.CLAMP)
+        c.drawPath(beam, fill); fill.shader = null
+        // 軌道
+        stroke.strokeWidth = 2f; stroke.color = cyan((110 * ep).toInt())
+        c.drawOval(ccx - rx, ccy - ry, ccx + rx, ccy + ry, stroke)
+        c.save(); c.rotate(0f)
+        dash.strokeWidth = 2f; dash.color = cyan((70 * ep).toInt()); c.drawOval(ccx - rx * 1.12f, ccy - ry * 1.12f + coreR * 0.18f, ccx + rx * 1.12f, ccy + ry * 1.12f + coreR * 0.18f, dash)
+        c.restore()
+        val base = coreR * 0.27f
+        val geo = Array(n) { i ->
+            val th = i * step + carAng + (1f - ep) * 1.4f
+            val z = cos(th)
+            val k = 0.5f + 0.5f * (z + 1f) / 2f
+            floatArrayOf(ccx + rx * sin(th), ccy + ry * z, base * k * 2f, z)
+        }
+        carGeo = geo
+        var front = 0
+        for (i in 0 until n) if (geo[i][3] > geo[front][3]) front = i
+        for (i in geo.indices.sortedBy { geo[it][3] }) {
+            val g = geo[i]
+            val a = ep * (0.25f + 0.75f * (g[3] + 1f) / 2f)
+            val sel = i == front && abs(carVel) < 0.02f && !carDrag
+            val r = g[2] / 2f
+            val al = (255 * a).toInt()
+            val hex = hexPath(g[0], g[1], r, 30f)
+            fill.color = Color.argb((220 * a).toInt(), 2, 16, 28); c.drawPath(hex, fill)
+            if (sel) { glow.strokeWidth = r * 0.25f; glow.color = cyan((170 * ep).toInt()); c.drawPath(hex, glow) }
+            stroke.strokeWidth = if (sel) 3.5f else 2f; stroke.color = withA(if (sel) Color.WHITE else CYAN, al); c.drawPath(hex, stroke)
+            drawGlyphOrIcon(c, lList[i], g[0], g[1], r * 0.58f, al)
+        }
+        // 正面のアプリ名
+        val fg = geo[front]
+        val ls = max(unit * 0.55f, coreR * 0.12f)
+        drawLabel(c, lList[front].name, ccx, fg[1] + fg[2] / 2f + ls * 1.5f, ls, width * 0.7f, true, (255 * ep).toInt())
+        // 正面の照準
+        c.save(); c.rotate(t * 60f, fg[0], fg[1])
+        stroke.strokeWidth = 2f; stroke.color = cyan((200 * ep).toInt())
+        val rr = fg[2] * 0.68f
+        for (k in 0 until 4) c.drawArc(fg[0] - rr, fg[1] - rr, fg[0] + rr, fg[1] + rr, k * 90f + 10f, 40f, false, stroke)
+        c.restore()
     }
 }
