@@ -3,6 +3,7 @@
 
 使い方:  HUD_KEY=<合言葉> python3 push_tasks.py morning tasks.json
          HUD_KEY=<合言葉> python3 push_tasks.py weekly  tasks.json
+         HUD_KEY=<合言葉> python3 push_tasks.py read morning   （いま届いている内容をJSONで表示）
 
 tasks.json の形:
 {
@@ -14,10 +15,7 @@ p は 1=急ぎ 2=今日中 3=今週中（weekly では無視される）。
 """
 import base64, datetime, json, os, sys
 
-def main():
-    if len(sys.argv) != 3 or sys.argv[1] not in ("morning", "weekly"):
-        sys.exit(__doc__)
-    kind, src = sys.argv[1], sys.argv[2]
+def load_key():
     try:
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
     except ImportError:
@@ -26,6 +24,24 @@ def main():
     key = base64.urlsafe_b64decode(k + "=" * (-len(k) % 4))
     if len(key) != 32:
         sys.exit("HUD_KEY が正しくありません")
+    return AESGCM(key)
+
+def read(kind):
+    aes = load_key()
+    path = "tasks-%s.enc" % kind
+    if not os.path.exists(path):
+        print(json.dumps({"headline": "", "tasks": []}, ensure_ascii=False)); return
+    raw = base64.b64decode(open(path).read().strip())
+    data = json.loads(aes.decrypt(raw[:12], raw[12:], None).decode("utf-8"))
+    print(json.dumps(data, ensure_ascii=False, indent=1))
+
+def main():
+    if len(sys.argv) == 3 and sys.argv[1] == "read" and sys.argv[2] in ("morning", "weekly"):
+        return read(sys.argv[2])
+    if len(sys.argv) != 3 or sys.argv[1] not in ("morning", "weekly"):
+        sys.exit(__doc__)
+    kind, src = sys.argv[1], sys.argv[2]
+    aes = load_key()
     data = json.load(open(src, encoding="utf-8"))
     tasks = []
     for t in data.get("tasks", [])[:30]:
@@ -45,7 +61,7 @@ def main():
     payload = {"v": 1, "kind": kind, "updated": datetime.datetime.now(jst).isoformat(timespec="seconds"),
                "headline": str(data.get("headline", ""))[:120], "tasks": tasks}
     nonce = os.urandom(12)
-    ct = AESGCM(key).encrypt(nonce, json.dumps(payload, ensure_ascii=False).encode("utf-8"), None)
+    ct = aes.encrypt(nonce, json.dumps(payload, ensure_ascii=False).encode("utf-8"), None)
     out = "tasks-%s.enc" % kind
     with open(out, "w") as f:
         f.write(base64.b64encode(nonce + ct).decode() + "\n")
